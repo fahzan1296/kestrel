@@ -1,0 +1,168 @@
+# KESTREL 1.6 — konfigurasi terpusat (format TOML).
+# Semua komponen (CLI `python -m kestrel.cli`, trainer unified, dashboard,
+# bot Lichess) membaca file ini. Nilai di sini menimpa default di
+# kestrel/config.py; flag CLI menimpa nilai di sini per pemanggilan —
+# tidak perlu 1x konfigurasi per 1 eksperimen lagi.
+
+[search]
+# Jaminan kedalaman: setiap langkah menyelesaikan setidaknya `min_depth`,
+# dengan anggaran tambahan hingga time_ms + grace_ms.
+min_depth = 6
+grace_ms = 1000
+max_depth = 64
+move_time_ms = 1000
+node_limit = 0
+tt_size = 262144
+use_null_move = true
+use_lmr = true
+use_lmp = true
+check_extension = true
+
+[selfplay]
+# Sumber utama budget trainer unified (generasi memakai nilai ini).
+games_per_batch = 10000
+concurrency = 2
+time_ms = 150
+max_depth = 20
+min_depth = 10          # jaminan depth per langkah (grace time)
+grace_ms = 600
+max_plies = 160
+temperature = 0.25
+opening_diversity_plies = 12
+tt_size = 262144
+use_book = true        # langkah pembuka dari knowledge base
+
+[learning]
+epochs = 10
+lr = 0.015
+batch_size = 64
+patience = 4
+validation_fraction = 0.20
+seed = 42
+max_samples_per_game = 120
+
+[reda]
+enabled = true
+max_active_features = 3
+max_abs_residual_weight = 0.02
+learning_rate = 0.01
+l2 = 0.002
+min_validation_improvement = 0.00001
+verification_depth = 12
+verification_time_ms = 1500
+max_candidate_positions_per_batch = 24
+max_tracked_positions = 100000
+verification_steps = 160
+auto_after_batch = false   # dashboard checkbox lama (tetap kompatibel)
+match_pairs = 4
+match_time_ms = 150
+match_depth = 8
+min_match_score_rate = 0.35
+
+[eval]
+# Verifikasi otomatis champion vs challenger, setiap generasi trainer.
+games = 30                # genap (warna seimbang)
+time_ms = 300
+max_depth = 10
+min_depth = 6
+grace_ms = 600
+temperature = 0.0
+sprt_elo0 = 0.0
+sprt_elo1 = 35.0
+sprt_alpha = 0.05
+sprt_beta = 0.10
+min_score_rate = 0.50     # ambang promote bila SPRT belum H1
+max_tactical_regression = 0
+require_consistency = true
+min_nps_ratio = 0.60
+seed = 2024
+
+[train]
+# Loop unified: selfplay -> knowledge -> learning -> REDA -> verify -> promote.
+generations = 10
+auto_promote = true
+keep_last_checkpoints = 5
+report_every = true
+
+[knowledge]
+enabled = true
+book_max_plies = 10
+book_min_games = 2
+book_max_moves_per_position = 3
+db_name = "knowledge.db"
+
+[arena]
+promotion_mode = "sprt"
+minimum_games = 100
+sprt_alpha = 0.05
+sprt_beta = 0.10
+sprt_elo1 = 35.0
+
+[stockfish]
+enabled = false
+path = ""
+threads = 1
+hash_mb = 128
+
+# ---------------- 1.7: cross-engine (Kestrel vs Stockfish) -------------------
+[cross]
+games_per_batch = 20
+skill = 5                # Skill Level Stockfish awal (0..20)
+skill_min = 0            # batas bawah adaptive skill
+skill_max = 12           # batas atas adaptive skill
+adaptive_skill = true    # skill naik/turun otomatis mengikuti score_rate
+skill_up_score = 0.62    # score_rate jendela >= ini -> skill +1
+skill_down_score = 0.32  # score_rate jendela <= ini -> skill -1
+skill_window = 4         # game terakhir yang dirata-rata
+parallel = 1             # 1 = sekuensial; N = N game proses-paralel
+stockfish_time_ms = 200
+time_ms = 150
+max_depth = 10
+max_plies = 160
+min_depth = 6
+grace_ms = 600
+use_book = true
+
+[lichess]
+# Fitur "jadi AI Lichess": python -m kestrel.cli lichess --token XXX
+# (atau env KESTREL_LICHESS_TOKEN — JANGAN pernah bagikan screenshot token!)
+token = ""
+username = "Azchess-1"
+accept_bot = true
+accept_human = true       # tantangan dari akun manusia DITERIMA (wajib true
+                          # bila kamu menantang bot dari akun utamamu)
+max_rating_gap = 400
+min_rating = 0
+concurrency = 2
+move_time_ms = 1000
+max_depth = 18
+min_depth = 10            # jaminan depth tinggi saat bermain online
+grace_ms = 1500
+book_moves = true
+resign_cp = -900          # resign setelah N langkah berturut <= ambang
+resign_moves = 3
+offer_draw_cp = 0         # claim draw hanya bila skor < ambang
+poll_seconds = 2.0
+max_games = 0             # 0 = tanpa batas
+pgn_dir = "lichess"
+auto_seek = true
+seek_interval_seconds = 60.0
+seek_pool_size = 100      # 1..512
+seek_cooldown_games = 10
+seek_rated = false        # aman untuk uji bot; docs menyarankan casual
+seek_clock_seconds = 300
+seek_increment_seconds = 3
+seek_color = "random"
+learn_from_games = true
+learn_every_games = 5     # 0 = nonaktif
+learn_min_games = 8
+learn_max_games = 200
+
+[storage]
+database = "results/kestrel.db"
+pgn_directory = "results/"
+results_dir = "results"
+pgn_file = "results/games.pgn"
+
+# Catatan: section lama 1.4/1.5 ([engine], [evaluator], [adaptive], dst.)
+# masih diterima dan dipetakan otomatis oleh kestrel/config.py.

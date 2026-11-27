@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kestrel"
+version = "1.7.0"
+description = "KESTREL — CPU-native chess intelligence: unified trainer, knowledge base, auto verification, Lichess bot"
+requires-python = ">=3.10"
+dependencies = [
+    "python-chess>=1.999",
+    "numpy>=1.26",
+    "matplotlib>=3.8",
+    "tqdm>=4.66",
+]
+
+[project.scripts]
+kestrel = "kestrel.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+bot = ["requests>=2.31"]
+monitor = ["fastapi>=0.110", "uvicorn>=0.27"]
+
+[tool.setuptools.packages.find]
+include = ["kestrel*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
