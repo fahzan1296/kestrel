@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -370,7 +371,7 @@ def cmd_lichess(args) -> int:
         cfg = cfg.with_overrides("lichess", max_games=args.max_games)
     if args.concurrency is not None:
         cfg = cfg.with_overrides("lichess", concurrency=args.concurrency)
-    token = cfg.lichess.token
+    token = cfg.lichess.token or os.environ.get("KESTREL_LICHESS_TOKEN", "")
     if not token and not args.dry_run:
         print("Token Lichess belum ada. Set [lichess] token di config.toml "
               "atau --token. Buat token di https://lichess.org/account/oauth/token "

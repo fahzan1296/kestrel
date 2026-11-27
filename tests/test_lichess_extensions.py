@@ -487,3 +487,25 @@ def test_submit_game_builds_player_inside_worker_thread(tmp_path, monkeypatch):
     executor.shutdown(wait=True)
     assert maker_threads and main_thread not in maker_threads
     assert any("/move/" in path for path in posted)
+
+
+def test_cli_lichess_uses_env_token(monkeypatch):
+    """Env token dipakai saat config kosong, supaya deploy tidak butuh secret di file."""
+    import kestrel.cli as cli
+    import kestrel.lichess_bot as botmod
+
+    captured = {}
+
+    class FakeBot:
+        def __init__(self, cfg, token=None, dry_run=False):
+            captured["observed"] = token
+            captured["dry_run"] = dry_run
+
+        def run(self):
+            return None
+
+    monkeypatch.setattr(botmod, "LichessBot", FakeBot)
+    monkeypatch.setenv("KESTREL_LICHESS_TOKEN", "from-env")
+    args = cli.build_parser().parse_args(["lichess"])
+    assert cli.cmd_lichess(args) == 0
+    assert captured["observed"] == "from-env"

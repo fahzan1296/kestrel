@@ -106,7 +106,7 @@ Expected: perintah `git diff ... --name-only` tidak menampilkan file apa pun; co
 
 Tambahkan `test_cli_lichess_uses_env_token`: monkeypatch `kestrel.lichess_bot.LichessBot`
 dengan kelas palsu yang merekam `token`, set env `KESTREL_LICHESS_TOKEN` ke nilai
-dummy `dummy-token`, parse `["lichess"]`, panggil `cmd_lichess`, lalu
+dummy `from-env`, parse `["lichess"]`, panggil `cmd_lichess`, lalu
 assert token yang tercatat sama dengan dummy.
 
 - [ ] **Step 2: Verifikasi RED**
@@ -137,7 +137,7 @@ git diff --cached -i -G'lip_[A-Za-z0-9]{10,}|token[[:space:]]*=[[:space:]]*"[^"]
 git commit -m "fix: baca token Lichess dari env saat menjalankan CLI"
 ```
 
-Expected: scan tidak menampilkan file. Pakai nilai dummy `dummy-token` di test supaya
+Expected: scan tidak menampilkan file. Pakai nilai dummy `from-env` di test supaya
 regex scan tidak mengira ada token asli.
 
 ---
