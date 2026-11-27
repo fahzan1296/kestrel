@@ -1,0 +1,12 @@
+services:
+  - type: worker
+    name: kestrel-lichess-bot
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerCommand: python3 -m kestrel.cli lichess
+    autoDeploy: true
+    branch: main
+    envVars:
+      - key: KESTREL_LICHESS_TOKEN
+        sync: false
