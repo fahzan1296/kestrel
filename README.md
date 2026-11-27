@@ -188,3 +188,7 @@ A real end-to-end smoke run ships in `results/smoke/`: two verification reports
 (one REJECT at score 0.25, one PROMOTE at 0.5 — both decision paths exercised),
 `train_report_*.json`, `training_log.jsonl`, the learned knowledge database and
 the console log. The full test suite (11 tests) passes.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Fahzan Dewantara.
