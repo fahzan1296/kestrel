@@ -1,6 +1,6 @@
 # Deployment: bot Lichess di InstaBox
 
-Bot Lichess Kestrel 1.8.0 dijalankan di mesin InstaBox `box-001d46`
+Bot Lichess Kestrel 2.0.0 dijalankan di mesin InstaBox `box-001d46`
 (`m_agrbxnvui5c57gc5fz655cqniu`) sebagai proses background. Render dan Hugging Face
 Space tidak dipakai lagi.
 
@@ -8,7 +8,7 @@ Space tidak dipakai lagi.
 
 | Path | Isi |
 |---|---|
-| `/data/home/kestrel` | source Kestrel 1.8.0 |
+| `/data/home/kestrel` | source Kestrel 2.0.0 |
 | `/data/home/kestrel/.venv` | virtualenv Python 3.13 |
 | `/data/home/kestrel/.env` | `KESTREL_LICHESS_TOKEN` dan `IB_KEY`, mode `0600` |
 | `/data/home/kestrel/supervisor.sh` | loop restart bot |
@@ -18,7 +18,9 @@ Space tidak dipakai lagi.
 | `/data/home/kestrel/lease.log` | hasil renew lease |
 
 `config.toml` memakai `token = ""`; CLI membaca `KESTREL_LICHESS_TOKEN` dari `.env`.
-File `.env` tidak masuk git dan tidak pernah dicetak.
+File `.env` tidak masuk git dan tidak pernah dicetak. Evaluator runtime adalah
+TinyNNUE dengan baseline bawaan `kestrel/models/nnue_baseline.json`; champion
+opsional dibaca dari `results/nnue_eval.json` bila tersedia.
 
 ## Menjalankan ulang
 
@@ -64,6 +66,11 @@ Jadi bot bisa sesekali offline sampai mesin bisa dibangunkan lagi. Ini sudah
 disetujui sebagai konsekuensi memakai paket free.
 
 ## Rollback
+
+Backup deployment 1.8.0 berada di `/data/home/backups/kestrel-1.8-<timestamp>`
+di mesin. Untuk rollback penuh, hentikan supervisor, kembalikan isi backup ke
+`/data/home/kestrel` dengan tetap memakai `.env` dan `.venv`, lalu restart
+supervisor. Jangan pernah menyalin token ke `config.toml`.
 
 Matikan keduanya tanpa menghapus mesin:
 

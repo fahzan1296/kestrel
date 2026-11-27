@@ -1,21 +1,18 @@
-"""KESTREL 1.6 — TRAINER UNIFIED: satu pipeline, satu perintah.
+"""KESTREL 2.0 — TRAINER UNIFIED: satu pipeline, satu perintah.
 
-Menggabungkan self-play, learning, dan REDA menjadi SATU alur otomatis per
-generasi (semua budget mengikuti satu config):
+Menggabungkan self-play, knowledge, dan training TinyNNUE menjadi SATU alur
+otomatis per generasi (semua budget mengikuti satu config):
 
     [generasi N]
     1. SELFPLAY   — batch game proses-paralel dengan champion saat ini
                     (+ langkah book dari knowledge base).
     2. KNOWLEDGE  — perbarui opening book & pengalaman posisi dari korpus.
-    3. LEARNING   — latih bobot outcome dari hasil game (logistic SGD,
-                    holdout game-level).
-    4. REDA       — distilasi skor pencarian mendalam ke residual mikro
-                    (in-memory; tanpa commit otomatis).
-    5. CANDIDATE  — gabungkan bobot outcome baru + residual REDA → checkpoint
-                    gen_N.
-    6. VERIFY     — match champion vs challenger (warna seimbang, SPRT, Elo
+    3. NNUE       — latih net challenger: distilasi skor search (komentar PGN
+                    self-play) + hasil game, warm start dari champion.
+    4. CANDIDATE  — simpan checkpoint net gen_N.
+    5. VERIFY     — match champion vs challenger (warna seimbang, SPRT, Elo
                     CI, per-opening) + benchmark taktik/NPS/konsistensi.
-    7. PROMOTE    — champion baru hanya bila lolos gate; kalau gagal, champion
+    6. PROMOTE    — champion baru hanya bila lolos gate; kalau gagal, champion
                     lama tetap (rollback implisit) dan kandidat diarsipkan.
 
 Setiap generasi menghasilkan laporan JSON; seluruh run menghasilkan
@@ -31,7 +28,7 @@ from typing import Any
 
 from .config import AppConfig, load_config, validate_config
 from .knowledge import KnowledgeBase
-from .learning import OutcomeModel, train_pgn
+from .nnue import TinyNNUE
 from .verification import report_markdown, save_report, verify_challenger
 from .versioning import CheckpointStore
 
@@ -65,30 +62,16 @@ class QuickOverrides:
         cfg = cfg.with_overrides("selfplay", games_per_batch=2, time_ms=100,
                                  max_depth=6, min_depth=3, grace_ms=200,
                                  max_plies=60, concurrency=2, use_book=True)
-        cfg = cfg.with_overrides("learning", epochs=3, batch_size=32)
-        cfg = cfg.with_overrides("reda", enabled=True, verification_depth=6,
-                                 verification_time_ms=300,
-                                 max_candidate_positions_per_batch=8,
-                                 verification_steps=80)
+        cfg = cfg.with_overrides("nnue", epochs=2, batch_size=64,
+                                 max_samples_per_game=40)
         cfg = cfg.with_overrides("eval", games=2, time_ms=100, max_depth=6,
                                  min_depth=3, grace_ms=200, min_score_rate=0.40)
         cfg = cfg.with_overrides("knowledge", book_min_games=1)
         return cfg
 
 
-def _champion_candidate_merge(champion: OutcomeModel, trained: OutcomeModel) -> OutcomeModel:
-    """Gabungkan bobot outcome hasil training dengan residual REDA champion.
-
-    Learning (outcome) dan REDA (mikro residual) adalah dua kepala berbeda;
-    keduanya dibawa ke kandidat sehingga pengetahuan dari kedua jalur tidak
-    pernah hilang antar generasi.
-    """
-    return OutcomeModel(trained.weights, trained.bias,
-                        champion.micro_weights, champion.micro_bias)
-
-
 def _count_pgn_games(path: Path) -> int:
-    """Hitung game dalam PGN dengan pemindaian header yang murah (bugfix 1.7).
+    """Hitung game dalam PGN dengan pemindaian header yang murah.
 
     dipakai saat ``reuse_pgn`` agar statistik selfplay dilaporkan dari file
     nyata, bukan angka karangan.
@@ -125,7 +108,6 @@ def run_training(cfg: AppConfig | None = None, *, generations: int | None = None
     if errors:
         raise ValueError("Konfigurasi tidak valid: " + "; ".join(errors))
 
-    from .reda_pipeline import reda_adapt_model
     from .selfplay import run_selfplay
 
     results = cfg.results_path
@@ -151,15 +133,15 @@ def run_training(cfg: AppConfig | None = None, *, generations: int | None = None
                   "generations": [], "config": {
                       "selfplay": cfg.selfplay.__dict__,
                       "eval": cfg.eval.__dict__,
-                      "reda": dict(cfg.reda.__dict__)}}
+                      "nnue": dict(cfg.nnue.__dict__)}}
     ok_all = True
     stopped_early = False
 
     for gen_index in range(cfg.train.generations):
         if stop_flag is not None and stop_flag.is_set():
             emit("dihentikan oleh pengguna", generation=gen_index)
-            # 1.7 bugfix: hentian oleh pengguna bukan kegagalan pipeline —
-            # generasi yang sudah selesai tetap dilaporkan status STOPPED.
+            # hentian oleh pengguna bukan kegagalan pipeline — generasi yang
+            # sudah selesai tetap dilaporkan status STOPPED.
             stopped_early = True
             break
         gen_t0 = time.monotonic()
@@ -173,7 +155,7 @@ def run_training(cfg: AppConfig | None = None, *, generations: int | None = None
         gen_number = f"{champion_gen + 1} (try {attempt})"
         gen_summary = {"generation": champion_gen + 1, "attempt": attempt,
                        "label": gen_label, "stages": {}}
-        champion = store.load_champion()
+        champion = store.load_champion() if store.has_trained_champion() else None
         emit(f"=== GENERASI {champion_gen + 1} (percobaan {attempt}) ===",
              champion_gen=champion_gen)
 
@@ -183,8 +165,7 @@ def run_training(cfg: AppConfig | None = None, *, generations: int | None = None
         # menyatakan generasi gagal.
         sp: Any = {}
         if reuse_pgn:
-            # 1.7 bugfix: statistik korpus dihitung dari file PGN nyata, bukan
-            # angkar karangan; korpus_games=None tidak lagi gagal tiap generasi.
+            # statistik korpus dihitung dari file PGN nyata, bukan angka karangan
             counted = _count_pgn_games(pgn_path) if pgn_path.exists() else 0
             sp = {"games_requested": corpus_games or counted
                   or cfg.selfplay.games_per_batch,
@@ -201,7 +182,7 @@ def run_training(cfg: AppConfig | None = None, *, generations: int | None = None
                     time_ms=cfg.selfplay.time_ms, max_depth=cfg.selfplay.max_depth,
                     max_plies=cfg.selfplay.max_plies, temperature=cfg.selfplay.temperature,
                     min_depth=cfg.selfplay.min_depth, grace_ms=cfg.selfplay.grace_ms,
-                    learned_path=str(store.champion_model_path) if store.champion_model_path.exists() else None,
+                    net_path=str(store.champion_model_path) if store.has_trained_champion() else None,
                     book_path=str(kb.db_path) if kb and cfg.selfplay.use_book else None,
                     pgn_path=pgn_path, db_path=cfg.db_path,
                     book_max_plies=cfg.knowledge.book_max_plies,
@@ -236,72 +217,51 @@ def run_training(cfg: AppConfig | None = None, *, generations: int | None = None
             emit("knowledge diperbarui", book_moves=kbsum["book_moves_upserted"],
                  experience=kbsum["experience_positions"])
 
-        # ---------- 3. LEARNING (outcome) ----------
-        learning_report = None
-        candidate = champion
+        # ---------- 3. NNUE (distilasi + outcome) ----------
+        from .nnue import load_default
+        from .nnue_train import train_from_pgn
+        candidate: TinyNNUE | None = champion
         try:
-            # 1.8: warm start dari bobot champion (skema v2 + migrasi menjamin
-            # dimensi cocok) + lr decay + class balance dari config.
-            init_w = init_b = None
-            if cfg.learning.warm_start and champion is not None:
-                init_w, init_b = champion.weights, champion.bias
-            trained, learning_report = train_pgn(
-                [pgn_path], epochs=cfg.learning.epochs, lr=cfg.learning.lr,
-                seed=cfg.learning.seed, batch_size=cfg.learning.batch_size,
-                patience=cfg.learning.patience,
-                validation_fraction=cfg.learning.validation_fraction,
-                max_samples_per_game=cfg.learning.max_samples_per_game,
-                init_weights=init_w, init_bias=init_b if init_b is not None else 0.0,
-                lr_decay=cfg.learning.lr_decay,
-                class_balance=cfg.learning.class_balance)
-            candidate = _champion_candidate_merge(champion, trained)
-            gen_summary["stages"]["learning"] = {
-                "samples": learning_report["samples"], "games_read": learning_report["games_read"],
-                "best_epoch": learning_report["best_epoch"],
-                "validation_logloss": learning_report["best_validation_logloss"],
-                "validation_mode": learning_report["validation_mode"],
-                "warm_start": learning_report.get("warm_start"),
-                "lr_decay": learning_report.get("lr_decay"),
-                "class_balance": learning_report.get("class_balance")}
-            emit("learning selesai", samples=learning_report["samples"],
-                 best_epoch=learning_report["best_epoch"])
+            # Warm start dari champion; tanpa champion, mulai dari baseline
+            # bawaan (terlatih) — trainer tidak pernah mulai dari net acak.
+            base_net = champion if champion is not None else load_default()
+            candidate, nnue_report = train_from_pgn(
+                [pgn_path], base=base_net,
+                warm_start=cfg.nnue.warm_start,
+                epochs=cfg.nnue.epochs, lr=cfg.nnue.lr,
+                batch_size=cfg.nnue.batch_size, patience=cfg.nnue.patience,
+                validation_fraction=cfg.nnue.validation_fraction,
+                seed=cfg.nnue.seed, lr_decay=cfg.nnue.lr_decay,
+                distill_weight=cfg.nnue.distill_weight,
+                outcome_scale=cfg.nnue.outcome_scale_cp,
+                distill_clip=cfg.nnue.distill_clip_cp,
+                max_samples_per_game=cfg.nnue.max_samples_per_game,
+                teacher_fallback=cfg.nnue.teacher_fallback)
+            gen_summary["stages"]["nnue"] = {
+                "samples": nnue_report["samples"],
+                "labels_from_comments": nnue_report["corpus"]["labels_from_comments"],
+                "labels_from_teacher": nnue_report["corpus"]["labels_from_teacher"],
+                "best_epoch": nnue_report["best_epoch"],
+                "validation_mse_cp2": nnue_report["best_validation_mse_cp2"],
+                "validation_mode": nnue_report["validation_mode"],
+                "warm_start": nnue_report["warm_start"],
+                "params": nnue_report["params"]}
+            emit("nnue training selesai", samples=nnue_report["samples"],
+                 best_epoch=nnue_report["best_epoch"],
+                 val_mse_cp2=nnue_report["best_validation_mse_cp2"])
         except Exception as exc:
-            gen_summary["stages"]["learning"] = {"error": f"{type(exc).__name__}: {exc}"}
-            emit("learning gagal; kandidat = champion tanpa bobot baru", error=str(exc))
+            gen_summary["stages"]["nnue"] = {"error": f"{type(exc).__name__}: {exc}"}
+            emit("nnue training gagal; kandidat = champion tanpa bobot baru", error=str(exc))
 
-        # ---------- 4. REDA ----------
-        if cfg.reda.enabled and pgn_path.exists() and pgn_path.stat().st_size > 0:
-            try:
-                candidate, reda_report = reda_adapt_model(
-                    pgn_path, candidate, limit=cfg.reda.max_candidate_positions_per_batch,
-                    depth=cfg.reda.verification_depth, time_ms=cfg.reda.verification_time_ms,
-                    max_active=cfg.reda.max_active_features,
-                    max_abs_weight=cfg.reda.max_abs_residual_weight,
-                    learning_rate=cfg.reda.learning_rate, l2=cfg.reda.l2,
-                    min_improvement=cfg.reda.min_validation_improvement,
-                    steps=cfg.reda.verification_steps,
-                    memory_cap=cfg.reda.max_tracked_positions)
-                gen_summary["stages"]["reda"] = {
-                    k: reda_report.get(k) for k in
-                    ("accepted", "reason", "verified_count", "updated_features",
-                     "baseline_validation_mse_cp2", "candidate_validation_mse_cp2",
-                     "elapsed_seconds")}
-                emit("reda selesai", accepted=reda_report.get("accepted"),
-                     reason=reda_report.get("reason"))
-            except Exception as exc:
-                gen_summary["stages"]["reda"] = {"error": f"{type(exc).__name__}: {exc}"}
-                emit("reda error", error=str(exc))
-
-        # ---------- 5. CANDIDATE ----------
+        # ---------- 4. CANDIDATE ----------
         cand_path = store.save_candidate(
             candidate, gen_label,
-            metadata=_json_safe({"reda": gen_summary["stages"].get("reda"),
-                                 "learning": gen_summary["stages"].get("learning"),
+            metadata=_json_safe({"nnue": gen_summary["stages"].get("nnue"),
                                  "selfplay": {k: sp.get(k) for k in ("games_finished",
-                                                                       "draw_rate", "avg_plies")}}))
+                                                                     "draw_rate", "avg_plies")}}))
         gen_summary["candidate"] = str(cand_path)
 
-        # ---------- 6. VERIFY + 7. PROMOTE ----------
+        # ---------- 5. VERIFY + 6. PROMOTE ----------
         promoted = False
         if verify and cfg.train.auto_promote:
             ver = verify_challenger(champion, candidate, cfg, quick=quick,

@@ -1,9 +1,9 @@
 """KESTREL 1.6 — Pipeline end-to-end (kini berbasis trainer unified).
 
 Tahap default: tests -> train (generasi unified: selfplay -> knowledge ->
-learning -> REDA -> verification -> promote) -> benchmark -> stockfish.
+nnue -> verification -> promote) -> benchmark -> stockfish.
 
-1.5 lama punya tahap terpisah (selfplay, learning, match); di 1.6 ketiganya
+Versi lama punya tahap terpisah (selfplay, learning, match); di 2.0 semuanya
 digabung dalam satu tahap `train` supaya selalu satu config dan selalu ada
 eval otomatis champion vs challenger. `--skip` tetap mendukung nama tahap.
 
@@ -37,7 +37,7 @@ def stage_tests(quick: bool) -> dict:
 
 
 def stage_train(quick: bool) -> dict:
-    """Satu generasi pipeline unified (selfplay+knowledge+learning+REDA+verify)."""
+    """Satu generasi pipeline unified (selfplay+knowledge+nnue+verify)."""
     from kestrel.config import load_config
     from kestrel.trainer import QuickOverrides, run_training
     cfg = load_config()

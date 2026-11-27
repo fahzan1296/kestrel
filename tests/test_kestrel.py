@@ -3,10 +3,11 @@ import sys, time
 sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.dirname(__import__("os").path.abspath(__file__))))
 import chess
 from kestrel.core import perft, is_terminal
-from kestrel.eval import evaluate, stm_eval, TinyMLP, handcrafted
+from kestrel.eval import evaluate, stm_eval
+from kestrel.nnue import TinyNNUE
 from kestrel.search import Searcher, _tt_key
 from kestrel.arena import play_game, match, Player, wilson_ci, sprt
-from kestrel.memory import AdaptiveMemory
+from kestrel.teacher import TeacherEvaluator, static_eval
 
 PASS = 0; FAIL = 0
 def check(name, cond, extra=""):
@@ -28,26 +29,37 @@ def test_engine_acceptance():
     b3 = chess.Board("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1")
     check("stalemate detection U=0", is_terminal(b3) == 0)
 
-    print("== 2. Evaluator ==")
-    net = TinyMLP()
+    print("== 2. Evaluator (TinyNNUE sepenuhnya) ==")
+    net = TinyNNUE()  # kepala output nol: net acak TIDAK menghasilkan skor
     check("param < 1M", net.params() < 1_000_000, f"({net.params()})")
     check("param di target 100k-300k", 100_000 <= net.params() <= 300_000)
     start_eval = evaluate(chess.Board(), net)
     check("eval finite", abs(start_eval) < 10**6, f"({start_eval})")
-    check("output net finite", abs(net.forward(chess.Board())) < 10**6)
-    # simetri: posisi mirrored harus ~sama
-    pos = chess.Board("r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4")
-    mir = pos.mirror()
-    check("mirror antisymmetry |H+H'| < 30cp", abs(handcrafted(pos) + handcrafted(mir)) < 30,
-          f"({handcrafted(pos)} vs {handcrafted(mir)})")
+    check("net acak mulai netral (kepala nol)", net.raw(chess.Board()) == 0.0)
+    # antisimetri mirror EKSAK (perspektif STM, by construction)
+    import random as _r
+    rng_m = _r.Random(11)
+    drift = 0
+    for _ in range(60):
+        bm = chess.Board()
+        for _j in range(rng_m.randint(1, 30)):
+            ms = list(bm.legal_moves)
+            if not ms:
+                break
+            bm.push(rng_m.choice(ms))
+        if bm.is_valid() and not bm.is_game_over():
+            drift = max(drift, abs(net.white_score(bm) + net.white_score(bm.mirror())))
+    check("mirror antisymmetry drift == 0 (eksak)", drift == 0, f"(drift={drift})")
     # Checkmate score must be positive for White when Black is mated, and vice versa.
     mate_black = chess.Board("7k/6Q1/6K1/8/8/8/8/8 b - - 0 1")
-    check("mate score has correct White perspective", mate_black.is_checkmate() and handcrafted(mate_black) > 0)
-    check("mirrored mate score is negative", mate_black.mirror().is_checkmate() and handcrafted(mate_black.mirror()) < 0)
-    check("TinyMLP starts neutral", TinyMLP().forward(chess.Board()) == 0.0)
+    check("mate score has correct White perspective", mate_black.is_checkmate() and static_eval(mate_black) > 0)
+    check("mirrored mate score is negative", mate_black.mirror().is_checkmate() and static_eval(mate_black.mirror()) < 0)
     check("TT key includes halfmove clock", _tt_key(chess.Board()) != _tt_key(chess.Board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 20 1")))
-    check("TinyMLP custom aux dimension is supported", TinyMLP(aux_dim=4).forward(chess.Board()) == 0.0)
-    check("TinyMLP accepts integral float aux dimension", TinyMLP(aux_dim=4.0).forward(chess.Board()) == 0.0)  # pyright: ignore[reportArgumentType]
+    # TeacherEvaluator (evaluator klasik) punya antarmuka sama dgn TinyNNUE.
+    te = TeacherEvaluator()
+    check("teacher antarmuka kompatibel", te.white_score(mate_black) > 0)
+    dw, db = te.delta([], [])
+    check("teacher delta no-op", not dw.any() and not db.any())
 
     print("== 3. Search ==")
     invalid_budget_rejected = False
@@ -110,17 +122,7 @@ def test_engine_acceptance():
     check("node-limit is reported distinctly", limited_info["node_limited"] and limited_info["stop_reason"] == "node_limit")
     check("incomplete depth is not published", limited_info["completed_depth"] == 0)
 
-    print("== 4. Adaptive Memory ==")
-    import os
-    if os.path.exists("/tmp/kestrel_test.db"): os.remove("/tmp/kestrel_test.db")
-    mem = AdaptiveMemory("/tmp/kestrel_test.db")
-    bb = chess.Board(); mem.remember(bb, "e2e4", 0.5, 10)
-    row = mem.db.execute("SELECT id FROM memory").fetchone()
-    mem.activate(row[0])
-    check("memory store+retrieve", len(mem.retrieve(bb)) > 0)
-    mem.disable(row[0])
-    check("disable memory", len(mem.retrieve(bb)) == 0)
-    check("influence bounded A_max", mem.influence(bb) <= mem.a_max)
+    print("== 4. (Adaptive Memory dihapus di 2.0 — tidak dipakai runtime) ==")
 
     print("== 5. Arena / Statistik ==")
     w_, d_, l_ = 5, 8, 2
@@ -144,9 +146,6 @@ def test_engine_acceptance():
     forfeited, forfeit_pgn, _ = play_game(NoMovePlayer(), p2, seed=9)  # pyright: ignore[reportArgumentType]
     check("engine returning no move forfeits instead of drawing",
           forfeited == "0-1" and 'Engine forfeit: no move returned' in forfeit_pgn)
-    mem.save_game("Champion", "Challenger", res, plies, pgn, 7)
-    check("persistensi game", mem.db.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 1)
-
     print("== 6. Match Champion vs Challenger (8 games) ==")
     r = match(p1, p2, games=8, temperature=0.2, verbose=True)
     check("match balanced & lengkap", r["games"] == 8, f"(score={r['score_rate']:.2f}, eloΔ={r['elo_delta']:+.1f}, sprt={r['sprt']})")

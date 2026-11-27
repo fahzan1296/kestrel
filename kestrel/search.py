@@ -50,7 +50,8 @@ import chess
 from chess.polyglot import zobrist_hash
 
 from .core import PIECE_VALUES
-from .eval import TinyMLP, evaluate
+from .eval import evaluate
+from .nnue import TinyNNUE
 
 INF = 10 ** 9
 MATE = 100000
@@ -208,8 +209,8 @@ def _heavy_material(board: chess.Board) -> bool:
 
 
 class Searcher:
-    def __init__(self, net: TinyMLP | None = None, node_limit: int = 0,
-                 time_ms: int = 1000, max_depth: int = 64, tt_size: int = 1 << 18, learned=None,
+    def __init__(self, net: TinyNNUE | None = None, node_limit: int = 0,
+                 time_ms: int = 1000, max_depth: int = 64, tt_size: int = 1 << 18,
                  use_null_move: bool = True, use_lmr: bool = True, on_info=None,
                  use_lmp: bool = True, check_extension: bool = True,
                  min_depth: int = 0, grace_ms: int = 1000,
@@ -239,7 +240,6 @@ class Searcher:
                 or hard_ext_min_budget_ms < 0):
             raise ValueError("hard_ext_min_budget_ms must be a non-negative integer")
         self.net = net
-        self.learned = learned
         self.node_limit = int(node_limit)
         self.time_ms = int(time_ms)
         self.max_depth = int(max_depth)
@@ -308,6 +308,12 @@ class Searcher:
         self._zlen = -1                       # len(board.move_stack) yang ter-sinkron
         self._pre_castle = 0                  # hak castling clean di root
         self._first_push = True
+        # 2.0: akumulator TinyNNUE inkremental — dipelihara bersama stack
+        # Zobrist (referensi array disimpan di stack, array TIDAK pernah
+        # dimutasi in-place sehingga restore referensi selalu aman).
+        self._acc_w = None                     # acc perspektif putih (numpy 128)
+        self._acc_b = None                     # acc perspektif hitam
+        self._acc_stack: list = []
 
     # ---------------- sinkronisasi & push/pop ber-hash (1.7) ----------------
     def _sync_hash(self, board: chess.Board) -> None:
@@ -324,6 +330,13 @@ class Searcher:
             self._pre_castle = board.clean_castling_rights()
             self._first_push = True
             self._zlen = len(board.move_stack)
+            # 2.0: akumulator ikut di-rebuild saat board diganti/diubah
+            # eksternal (root baru, push/pop manual dari test).
+            if self.net is not None:
+                self._acc_w, self._acc_b = self.net.refresh(board)
+            else:
+                self._acc_w = self._acc_b = None
+            self._acc_stack = []
 
     def _push(self, board: chess.Board, mv: chess.Move) -> None:
         """board.push(mv) + update Zobrist inkremental (eksak polyglot)."""
@@ -356,24 +369,34 @@ class Searcher:
         pt = board.piece_type_at(from_sq)
         base = 128 * (pt - 1)
         key ^= _PA[base + us_base + from_sq]              # pindahkan bidak keluar
+        # 2.0: kumpulkan perubahan bidak untuk delta akumulator TinyNNUE.
+        removed: list = [(pt, turn == chess.WHITE, from_sq)]
+        added: list = []
         if board.occupied_co[not turn] >> to_sq & 1:      # capture biasa
             vt = board.piece_type_at(to_sq)
             key ^= _PA[128 * (vt - 1) + them_base + to_sq]
+            removed.append((vt, turn != chess.WHITE, to_sq))
         elif (pt == chess.PAWN and to_sq == board.ep_square
               and (to_sq - from_sq == 7 or to_sq - from_sq == 9
                    or from_sq - to_sq == 7 or from_sq - to_sq == 9)):
             # en passant: pion lawan yang ditangkap ada di belakang kotak ep
             cap_sq = to_sq - 8 if turn == chess.WHITE else to_sq + 8
             key ^= _PA[base + them_base + cap_sq]
+            removed.append((chess.PAWN, turn != chess.WHITE, cap_sq))
         if promo:
             key ^= _PA[128 * (promo - 1) + us_base + to_sq]
+            added.append((promo, turn == chess.WHITE, to_sq))
         else:
             key ^= _PA[base + us_base + to_sq]
+            added.append((pt, turn == chess.WHITE, to_sq))
         if pt == chess.KING:
             rs = _ROOK_SHUFFLE.get(to_sq)
             if rs is not None and (to_sq - from_sq == 2 or from_sq - to_sq == 2):
                 rbase = 128 * (chess.ROOK - 1) + us_base
                 key ^= _PA[rbase + rs[0]] ^ _PA[rbase + rs[1]]
+                rook_color = turn == chess.WHITE
+                removed.append((chess.ROOK, rook_color, rs[0]))
+                added.append((chess.ROOK, rook_color, rs[1]))
         board.push(mv)
         # Term baru: giliran (flip), castling pasca-push (selalu clean), ep.
         if board.turn == chess.WHITE:
@@ -382,6 +405,13 @@ class Searcher:
         key ^= _ep_term(board)
         self._zkey = key & _U64
         self._zlen += 1
+        # 2.0: delta akumulator TinyNNUE (setelah push; array baru, tanpa
+        # mutasi in-place agar referensi di stack tetap valid).
+        if self.net is not None:
+            dw, db = self.net.delta(removed, added)
+            self._acc_stack.append((self._acc_w, self._acc_b))
+            self._acc_w = self._acc_w + dw
+            self._acc_b = self._acc_b + db
 
     def _push_null(self, board: chess.Board) -> None:
         """Null move: hanya flip giliran + clear ep (castling tak berubah)."""
@@ -395,12 +425,17 @@ class Searcher:
             key ^= _TURN_W
         self._zkey = key & _U64
         self._zlen += 1
+        if self.net is not None:
+            # Tidak ada perubahan bidak, tapi stack harus selaras dgn _pop.
+            self._acc_stack.append((self._acc_w, self._acc_b))
 
     def _pop(self, board: chess.Board) -> None:
-        """board.pop() + pulihkan Zobrist dari stack (selalu tepat)."""
+        """board.pop() + pulihkan Zobrist & akumulator dari stack (selalu tepat)."""
         board.pop()
         self._zkey = self._zstack.pop()
         self._zlen -= 1
+        if self.net is not None:
+            self._acc_w, self._acc_b = self._acc_stack.pop()
 
     def _is_check(self, board: chess.Board) -> bool:
         """board.is_check() dengan cache per kunci Zobrist (1.7)."""
@@ -463,8 +498,11 @@ class Searcher:
                 return hit
         else:
             key = None
-        value = int(evaluate(board, self.net, self.learned, in_check=in_check,
-                             has_moves=has_moves, terminal=terminal))
+        value = int(evaluate(board, self.net,
+                             accs=(self._acc_w, self._acc_b)
+                             if self.net is not None else None,
+                             in_check=in_check, has_moves=has_moves,
+                             terminal=terminal))
         if key is not None and len(self._eval_cache) < _EVAL_CACHE_MAX:
             self._eval_cache[key] = value
         return value

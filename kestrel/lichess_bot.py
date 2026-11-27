@@ -314,9 +314,7 @@ class LichessBot:
             fresh, self.pgn_dir / ".learn_corpus.pgn")
         try:
             from .knowledge import KnowledgeBase
-            from .learning import train_pgn
-            from .reda_pipeline import reda_adapt_model
-            from .trainer import _champion_candidate_merge
+            from .nnue_train import train_from_pgn
             from .verification import save_report, verify_challenger
 
             if self.cfg.knowledge.enabled:
@@ -329,32 +327,30 @@ class LichessBot:
                     book.learn_from_pgn(fresh)
                 finally:
                     book.db.close()
-            trained, training_report = train_pgn(
-                fresh,
-                epochs=self.cfg.learning.epochs,
-                lr=self.cfg.learning.lr,
-                seed=self.cfg.learning.seed,
-                max_samples_per_game=self.cfg.learning.max_samples_per_game,
-                validation_fraction=self.cfg.learning.validation_fraction,
-                batch_size=self.cfg.learning.batch_size,
-                patience=self.cfg.learning.patience)
             store = CheckpointStore(self.cfg.results_path)
-            champion = store.load_champion()
-            candidate = _champion_candidate_merge(champion, trained)
-            reda_report = {"ran": False}
-            if self.cfg.reda.enabled:
-                candidate, reda_report = reda_adapt_model(
-                    corpus, candidate,
-                    limit=self.cfg.reda.max_candidate_positions_per_batch,
-                    depth=self.cfg.reda.verification_depth,
-                    time_ms=self.cfg.reda.verification_time_ms,
-                    max_active=self.cfg.reda.max_active_features,
-                    max_abs_weight=self.cfg.reda.max_abs_residual_weight,
-                    learning_rate=self.cfg.reda.learning_rate,
-                    l2=self.cfg.reda.l2,
-                    min_improvement=self.cfg.reda.min_validation_improvement,
-                    steps=self.cfg.reda.verification_steps,
-                    memory_cap=self.cfg.reda.max_tracked_positions)
+            # Warm start dari champion; tanpa champion, dari baseline bawaan.
+            if store.has_trained_champion():
+                champion = store.load_champion()
+                base = champion
+            else:
+                champion = None
+                from .nnue import load_default
+                base = load_default()
+            candidate, training_report = train_from_pgn(
+                fresh,
+                base=base,
+                warm_start=True,
+                epochs=self.cfg.nnue.epochs,
+                lr=self.cfg.nnue.lr,
+                seed=self.cfg.nnue.seed,
+                max_samples_per_game=self.cfg.nnue.max_samples_per_game,
+                validation_fraction=self.cfg.nnue.validation_fraction,
+                batch_size=self.cfg.nnue.batch_size,
+                patience=self.cfg.nnue.patience,
+                lr_decay=self.cfg.nnue.lr_decay,
+                distill_weight=self.cfg.nnue.distill_weight,
+                outcome_scale=self.cfg.nnue.outcome_scale_cp,
+                distill_clip=self.cfg.nnue.distill_clip_cp)
             report = verify_challenger(champion, candidate, self.cfg, quick=True)
             label = f"lichess_{int(time.time())}"
             report_path = save_report(report, self.cfg.results_path, label)
@@ -362,8 +358,10 @@ class LichessBot:
                 candidate, label,
                 metadata={"source": "lichess_pgn", "games": len(fresh),
                           "decision": report.get("decision"),
-                          "training": training_report,
-                          "reda": reda_report})
+                          "training": {
+                              k: training_report.get(k) for k in
+                              ("samples", "best_epoch",
+                               "best_validation_mse_cp2")}})
             promoted = False
             if report.get("decision") == "PROMOTE" and self.cfg.train.auto_promote:
                 store.promote(candidate_path, "lichess_pgn_verified", report)
@@ -529,13 +527,7 @@ class LichessBot:
     # ---------------- player setup ----------------
     def _make_player(self) -> Player:
         store = CheckpointStore(self.cfg.results_path)
-        learned = None
-        if store.champion_model_path.exists():
-            try:
-                from .learning import OutcomeModel
-                learned = OutcomeModel().load(store.champion_model_path)
-            except (ValueError, KeyError, TypeError):
-                learned = None
+        net = store.load_champion()  # champion atau baseline bawaan (terlatih)
         book = None
         if self.lic.book_moves and self.cfg.knowledge_db_path.exists():
             try:
@@ -546,7 +538,7 @@ class LichessBot:
             except Exception:
                 book = None
         return Player("Kestrel-Lichess", time_ms=self.lic.move_time_ms,
-                      max_depth=self.lic.max_depth, learned=learned, book=book,
+                      max_depth=self.lic.max_depth, net=net, book=book,
                       min_depth=self.lic.min_depth, grace_ms=self.lic.grace_ms,
                       # 1.8: ekstensi waktu posisi sulit aktif saat bermain.
                       hard_ext_ms=self.lic.hard_ext_ms,

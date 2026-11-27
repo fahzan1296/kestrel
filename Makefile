@@ -30,7 +30,6 @@ book:               ## bangun/tampilkan knowledge base dari korpus
 	python3 -m kestrel.cli book build
 	python3 -m kestrel.cli book show
 
-## --- kompatibilitas 1.5 ---
 benchmark:
 	python3 -m kestrel.pipeline --quick --skip tests train
 
@@ -42,6 +41,12 @@ pipeline:           ## full: tests -> train(1 gen unified) -> benchmark -> stock
 
 quick:              ## smoke test cepat seluruh pipeline
 	python3 -m kestrel.pipeline --quick
+
+nnue-distill:       ## distilasi TinyNNUE dari korpus self-play
+	python3 -m kestrel.cli nnue distill results/games.pgn
+
+bootstrap:          ## buat checkpoint baseline bawaan
+	python3 scripts/bootstrap_nnue.py
 
 monitor:            ## dashboard monitoring localhost (optional dependency)
 	python3 -m kestrel.dashboard

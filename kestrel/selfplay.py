@@ -5,7 +5,7 @@ Berbeda dari dashboard (async + event live), runner ini dipanggil dari
 menulis PGN + SQLite, dan mengembalikan statistik batch. Worker memakai
 ``dashboard_worker.run_game_worker`` (satu implementasi game, dua pemakai).
 
-Argumen ``learned_path``/``book_path`` membuat generasi trainer berjalan
+Argumen ``net_path``/``book_path`` membuat generasi trainer berjalan
 dengan model champion + knowledge base saat itu tanpa menyentuh file live.
 
 Protokol sinkronisasi: setiap worker mengirim event ``worker_done`` sebagai
@@ -29,7 +29,7 @@ from .dashboard_worker import run_game_worker
 def run_selfplay(games: int, concurrency: int, time_ms: int, max_depth: int,
                  max_plies: int = 160, temperature: float = 0.25,
                  min_depth: int = 0, grace_ms: int = 600,
-                 learned_path: str | None = None, book_path: str | Path | None = None,
+                 net_path: str | None = None, book_path: str | Path | None = None,
                  pgn_path: str | Path | None = None, db_path: str | Path | None = None,
                  seed_base: int = 10000, progress=None,
                  stop_flag=None, book_max_plies: int | None = None,
@@ -73,7 +73,7 @@ def run_selfplay(games: int, concurrency: int, time_ms: int, max_depth: int,
             gid, seed = pending.pop(0)
             proc = ctx.Process(target=_worker_entry,
                                args=(gid, seed, time_ms, max_depth, max_plies,
-                                     event_q, learned_path, book_path, min_depth,
+                                     event_q, net_path, book_path, min_depth,
                                      grace_ms, temperature, book_max_plies,
                                      book_min_games, book_max_moves))
             try:
@@ -144,11 +144,11 @@ def run_selfplay(games: int, concurrency: int, time_ms: int, max_depth: int,
 
 
 def _worker_entry(gid, seed, time_ms, max_depth, max_plies, event_q,
-                  learned_path, book_path, min_depth, grace_ms, temperature,
+                  net_path, book_path, min_depth, grace_ms, temperature,
                   book_max_plies=None, book_min_games=None, book_max_moves=None):
     try:
         run_game_worker(gid, seed, time_ms, max_depth, max_plies, event_q,
-                        batch_id=None, learned_path=learned_path, book_path=book_path,
+                        batch_id=None, net_path=net_path, book_path=book_path,
                         min_depth=min_depth, grace_ms=grace_ms,
                         temperature=temperature, book_max_plies=book_max_plies,
                         book_min_games=book_min_games,

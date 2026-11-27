@@ -10,7 +10,6 @@ import chess
 import chess.pgn
 
 from .eval import stm_eval
-from .memory import AdaptiveMemory
 from .search import Searcher
 
 OPENINGS = [
@@ -124,22 +123,20 @@ def sprt(wdl, elo0=0.0, elo1=35.0, alpha=0.05, beta=0.10,
 
 
 class Player:
-    """Agent Kestrel: config search + evaluator + memory."""
+    """Agent Kestrel: config search + evaluator TinyNNUE + book."""
 
     def __init__(self, name, net=None, time_ms=300, node_limit=0, max_depth=64,
-                 memory: AdaptiveMemory | None = None, use_null_move=True,
-                 use_lmr=True, seed=42, learned=None, min_depth=0, grace_ms=1000,
-                 tt_size=None, book=None, hard_ext_ms=0, hard_ext_max=0):
+                 use_null_move=True, use_lmr=True, seed=42, min_depth=0,
+                 grace_ms=1000, tt_size=None, book=None,
+                 hard_ext_ms=0, hard_ext_max=0):
         self.name = name
         self.net = net
         self.time_ms = time_ms
         self.node_limit = node_limit
         self.max_depth = max_depth
-        self.memory = memory
         self.use_null_move = use_null_move
         self.use_lmr = use_lmr
         self.seed = seed
-        self.learned = learned
         self.book = book  # KnowledgeBase opsional (langkah pembuka statistik)
         self.book_moves_used = 0
         # Persistent per-player search state: TT, killers and history survive across moves.
@@ -149,7 +146,7 @@ class Player:
         searcher_kwargs: dict[str, Any] = {
             "node_limit": self.node_limit, "time_ms": self.time_ms,
             "max_depth": self.max_depth, "use_null_move": self.use_null_move,
-            "use_lmr": self.use_lmr, "learned": self.learned,
+            "use_lmr": self.use_lmr,
             "min_depth": min_depth, "grace_ms": grace_ms,
             "hard_ext_ms": int(hard_ext_ms), "hard_ext_max": int(hard_ext_max),
         }
@@ -181,7 +178,7 @@ class Player:
             for m in legal:
                 b2 = board.copy()
                 b2.push(m)
-                raw.append(-stm_eval(b2, self.net, self.learned) / max(temperature, 1e-3))
+                raw.append(-stm_eval(b2, self.net) / max(temperature, 1e-3))
             mx = max(raw)
             weights = [math.exp(v - mx) for v in raw]
             mv = rng.choices(legal, weights=weights, k=1)[0]
@@ -190,7 +187,7 @@ class Player:
 
 def play_game(white: Player, black: Player, fen: str | None = None,
               temperature: float = 0.0, seed: int = 42,
-              memory: AdaptiveMemory | None = None, max_plies: int = 300):
+              max_plies: int = 300):
     """Mainkan satu game lengkap; return (result, pgn, plies)."""
     if int(max_plies) != max_plies or max_plies < 1:
         raise ValueError("max_plies must be a positive integer")
@@ -224,8 +221,6 @@ def play_game(white: Player, black: Player, fen: str | None = None,
             # dashboard chart. Searcher.score_cp itself remains side-to-move.
             node.comment = f"{white_score}/d{info['depth']} n{info['nodes']}"
         plies += 1
-        if memory and board.is_capture(mv):
-            memory.remember(board, str(mv), 0, white_score)
     if forfeit_result is not None:
         result = forfeit_result
         game.headers["Termination"] = "Engine forfeit: no move returned"
@@ -247,8 +242,7 @@ def play_game(white: Player, black: Player, fen: str | None = None,
 
 
 def match(champ: Player, chall: Player, games: int = 20,
-          openings=None, memory: AdaptiveMemory | None = None,
-          temperature: float = 0.15, verbose=True):
+          openings=None, temperature: float = 0.15, verbose=True):
     """Pairwise match balanced warna + opening (Section 24). Returns dict."""
     if int(games) != games or games < 1:
         raise ValueError("games must be a positive integer")
@@ -261,10 +255,10 @@ def match(champ: Player, chall: Player, games: int = 20,
         fen = openings[i % len(openings)]
         seed = 1000 + i
         if i % 2 == 0:  # challenger putih
-            res, _, _ = play_game(chall, champ, fen, temperature, seed, memory)
+            res, _, _ = play_game(chall, champ, fen, temperature, seed)
             c_is_white = True
         else:
-            res, _, _ = play_game(champ, chall, fen, temperature, seed, memory)
+            res, _, _ = play_game(champ, chall, fen, temperature, seed)
             c_is_white = False
         if res == "1/2-1/2":
             d += 1

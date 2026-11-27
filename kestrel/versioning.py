@@ -1,15 +1,18 @@
-"""KESTREL 1.6 — Versioning checkpoint model (champion/challenger per generasi).
+"""KESTREL 2.0 — Versioning checkpoint TinyNNUE (champion/challenger per generasi).
 
 Kontrak file:
-- ``results/learned_eval.json``  : model champion aktif (kompatibel 1.5;
-  worker dashboard/selfplay memuat file ini).
-- ``results/champion.json``      : metadata champion (generasi, asal, laporan
-  verifikasi, riwayat promote).
-- ``results/checkpoints/gen_<N>_learned_eval.json`` : snapshot kandidat.
+- ``results/nnue_eval.json``        : net champion aktif (dipakai worker
+  dashboard/selfplay/bot Lichess/cross-engine).
+- ``results/champion.json``         : metadata champion (generasi, asal,
+  laporan verifikasi, riwayat promote).
+- ``results/checkpoints/gen_<label>_nnue.json`` : snapshot kandidat.
 
 Semua penggantian file atomik (write temp + os.replace) dan checkpoint lama
-dipertahankan sesuai ``keep_last_checkpoints``. Rollback mengembalikan snapshot
-sebelumnya tanpa menghapusnya.
+dipertahankan sesuai ``keep_last_checkpoints``. Rollback mengembalikan
+snapshot sebelumnya tanpa menghapusnya.
+
+``load_champion()`` TIDAK pernah mengembalikan net acak: tanpa champion,
+yang dipakai adalah checkpoint baseline terlatih bawaan paket.
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ import shutil
 import time
 from pathlib import Path
 
-from .learning import OutcomeModel
+from .nnue import TinyNNUE, load_default
 
 
 class CheckpointStore:
@@ -30,7 +33,7 @@ class CheckpointStore:
         self.checkpoints = self.results / "checkpoints"
         self.checkpoints.mkdir(exist_ok=True)
         self.keep_last = max(1, int(keep_last))
-        self.champion_model_path = self.results / "learned_eval.json"
+        self.champion_model_path = self.results / "nnue_eval.json"
         self.champion_meta_path = self.results / "champion.json"
 
     # ---------------- champion metadata ----------------
@@ -58,31 +61,32 @@ class CheckpointStore:
         # `generation` bisa int (champion lineage) atau str label unik
         # (mis. "0000_try02") supaya kandidat yang DITOLAK tidak saling
         # menimpa checkpoint/laporan antar iterasi trainer.
-        if isinstance(generation, int):
-            return self.checkpoints / f"gen_{generation:04d}_learned_eval.json"
-        return self.checkpoints / f"gen_{str(generation)}_learned_eval.json"
+        return self.checkpoints / f"gen_{str(generation)}_nnue.json"
 
-    def save_candidate(self, model: OutcomeModel, generation: int | str,
+    def save_candidate(self, net: TinyNNUE, generation: int | str,
                        metadata: dict | None = None) -> Path:
         path = self.candidate_path(generation)
         meta = dict(metadata or {})
         meta.setdefault("generation", generation)
         meta.setdefault("created_at", time.time())
-        model.save(path, metadata=meta)
+        net.save(path, metadata=meta)
         self._prune_checkpoints()
         return path
 
-    def load_model(self, path) -> OutcomeModel:
-        return OutcomeModel().load(Path(path))
+    def load_model(self, path) -> TinyNNUE:
+        return TinyNNUE.load(Path(path))
 
-    def load_champion(self) -> OutcomeModel:
-        model = OutcomeModel()
+    def load_champion(self) -> TinyNNUE:
+        """Champion aktif; tanpa champion file → baseline bawaan (terlatih)."""
         if self.champion_model_path.exists():
-            model.load(self.champion_model_path)
-        return model
+            return TinyNNUE.load(self.champion_model_path)
+        return load_default()
+
+    def has_trained_champion(self) -> bool:
+        return self.champion_model_path.exists()
 
     def candidates(self) -> list[Path]:
-        return sorted(self.checkpoints.glob("gen_*_learned_eval.json"))
+        return sorted(self.checkpoints.glob("gen_*_nnue.json"))
 
     # ---------------- promote / rollback ----------------
     def promote(self, candidate_path, reason: str, report: dict | None = None) -> dict:
@@ -97,7 +101,7 @@ class CheckpointStore:
         # Snapshot champion lama ke file stabil: history tidak boleh menunjuk
         # path live champion (file itu tertimpa kandidat baru). Promosi PERTAMA
         # (belum ada champion) menyimpan None — rollback ke entri ini dilewati
-        # otomatis (bugfix 1.7: sebelumnya menunjuk file yang tidak ada).
+        # otomatis.
         if self.champion_model_path.exists():
             snap = self.checkpoints / f"champion_gen_{meta.get('generation', 0):04d}.json"
             shutil.copy2(self.champion_model_path, snap)
@@ -122,8 +126,8 @@ class CheckpointStore:
         if not history:
             raise FileNotFoundError("Tidak ada riwayat untuk rollback")
         steps = max(1, min(int(steps), len(history)))
-        # 1.7 bugfix: entri pertama riwayat bisa tanpa snapshot (promosi
-        # pertama). Cari snapshot terdekat yang benar-benar ada.
+        # entri pertama riwayat bisa tanpa snapshot (promosi pertama). Cari
+        # snapshot terdekat yang benar-benar ada.
         entry = history[-steps]
         idx = -steps
         while entry.get("model_file") is None or not Path(entry["model_file"]).exists():

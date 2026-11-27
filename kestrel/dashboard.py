@@ -28,12 +28,11 @@ try:
         _CONFIG = tomllib.load(_cfg_file)
 except (OSError, tomllib.TOMLDecodeError):
     _CONFIG = {}
-_REDA_CONFIG = _CONFIG.get("reda", {})
 _SELFPLAY_CONFIG = _CONFIG.get("selfplay", {})
 RESULTS = ROOT / "results"
 STATIC = Path(__file__).resolve().parent / "web"
 RESULTS.mkdir(exist_ok=True)
-app = FastAPI(title="Kestrel Live Monitor", version="1.4.0-experimental")
+app = FastAPI(title="Kestrel Live Monitor", version="2.0.0")
 
 LOCK = threading.RLock()
 STATE: dict[str, Any] = {
@@ -48,10 +47,7 @@ ACTIVE: dict[int, mp.Process] = {}
 STOP_REQUESTED = False
 COORDINATOR: threading.Thread | None = None
 NEXT_GAME_ID = 1
-REDA_LOCK = threading.RLock()
-REDA_STATE: dict[str, Any] = {"status": "idle", "progress": {}, "result": None, "error": None}
-REDA_THREAD: threading.Thread | None = None
-# --- 1.6: trainer unified (selfplay+knowledge+learning+REDA+verify+promote) ---
+# --- 2.0: trainer unified (selfplay+knowledge+nnue+verify+promote) ---
 _TRAIN_LOCK = threading.RLock()
 TRAIN_STATE: dict[str, Any] = {"status": "idle", "run_id": None,
                                "last_message": None, "progress": {},
@@ -200,7 +196,7 @@ def _collector(q):
 
 
 
-def _run_batch(games: int, concurrency: int, time_ms: int, max_depth: int, max_plies: int, reda_after_batch: bool = False):
+def _run_batch(games: int, concurrency: int, time_ms: int, max_depth: int, max_plies: int):
     global STOP_REQUESTED, ACTIVE, NEXT_GAME_ID
     q = EVENT_QUEUE
     next_id = NEXT_GAME_ID
@@ -291,17 +287,6 @@ def _run_batch(games: int, concurrency: int, time_ms: int, max_depth: int, max_p
         STATE["finished_at"] = time.time()
         STATE["batch"]["worker_pids"] = []
     ACTIVE.clear()
-    if reda_after_batch and not STOP_REQUESTED:
-        # 1.7 bugfix #13: validasi pydantic REDARequest yang gagal (nilai
-        # config di luar batas model) dilaporkan ke REDA_STATE, bukan meledak
-        # di thread koordinator setelah status batch 'completed'.
-        try:
-            _launch_reda_job(REDARequest())
-        except Exception as exc:
-            with LOCK:
-                REDA_STATE.update(
-                    status="failed",
-                    error=f"REDA request tidak valid: {type(exc).__name__}: {exc}")
 
 
 
@@ -339,24 +324,6 @@ class RunRequest(BaseModel):
     time_ms: int = Field(default=int(_SELFPLAY_CONFIG.get("time_ms", 150)), ge=10, le=10000)
     max_depth: int = Field(default=int(_SELFPLAY_CONFIG.get("max_depth", 10)), ge=1, le=64)
     max_plies: int = Field(default=int(_SELFPLAY_CONFIG.get("max_plies", 160)), ge=20, le=500)
-    reda_after_batch: bool = False
-
-
-class REDARequest(BaseModel):
-    limit: int = Field(default=int(_REDA_CONFIG.get("max_candidate_positions_per_batch", 24)), ge=6, le=100)
-    memory_cap: int = Field(default=int(_REDA_CONFIG.get("max_tracked_positions", 100000)), ge=1000, le=500000)
-    depth: int = Field(default=int(_REDA_CONFIG.get("verification_depth", 12)), ge=1, le=64)
-    time_ms: int = Field(default=int(_REDA_CONFIG.get("verification_time_ms", 3000)), ge=50, le=60000)
-    max_active: int = Field(default=int(_REDA_CONFIG.get("max_active_features", 3)), ge=1, le=11)
-    max_abs_weight: float = Field(default=float(_REDA_CONFIG.get("max_abs_residual_weight", 0.02)), gt=0, le=0.05)
-    learning_rate: float = Field(default=float(_REDA_CONFIG.get("learning_rate", 0.01)), gt=0, le=0.2)
-    l2: float = Field(default=float(_REDA_CONFIG.get("l2", 0.002)), ge=0, le=1)
-    min_improvement: float = Field(default=float(_REDA_CONFIG.get("min_validation_improvement", 0.00001)), gt=0)
-    steps: int = Field(default=int(_REDA_CONFIG.get("verification_steps", 160)), ge=1, le=5000)
-    match_pairs: int = Field(default=int(_REDA_CONFIG.get("match_pairs", 4)), ge=1, le=30)
-    match_time_ms: int = Field(default=int(_REDA_CONFIG.get("match_time_ms", 150)), ge=10, le=10000)
-    match_depth: int = Field(default=int(_REDA_CONFIG.get("match_depth", 8)), ge=1, le=64)
-    min_match_score_rate: float = Field(default=float(_REDA_CONFIG.get("min_match_score_rate", 0.35)), ge=0, le=1)
 
 
 
@@ -378,9 +345,6 @@ def index():
 def get_state():
     with LOCK:
         snap = _json_safe(STATE)
-    with REDA_LOCK:
-        snap["reda"] = _json_safe(REDA_STATE)
-    snap["reda"]["rollback_available"] = (RESULTS / "learned_eval.json.reda_backup").exists()
     snap["train"] = _current_train_snapshot()
     start = snap.get("started_at")
     end = snap.get("finished_at") or (time.time() if snap.get("status") == "running" else start)
@@ -404,93 +368,12 @@ def run(req: RunRequest):
     with LOCK:
         if STATE["status"] in ("running", "starting"):
             raise HTTPException(409, "Batch sedang berjalan. Stop batch saat ini terlebih dahulu.")
-        with REDA_LOCK:
-            if REDA_STATE.get("status") in ("starting", "running"):
-                raise HTTPException(409, "REDA masih berjalan; tunggu sampai selesai sebelum memulai self-play baru.")
-            STATE["status"] = "starting"
-            STOP_REQUESTED = False
-    COORDINATOR = threading.Thread(target=_run_batch, args=(req.games, req.concurrency, req.time_ms, req.max_depth, req.max_plies, req.reda_after_batch), daemon=True)
+        STATE["status"] = "starting"
+        STOP_REQUESTED = False
+    COORDINATOR = threading.Thread(target=_run_batch, args=(req.games, req.concurrency, req.time_ms, req.max_depth, req.max_plies), daemon=True)
     COORDINATOR.start()
     settings = req.model_dump() if hasattr(req, "model_dump") else req.dict()
     return {"accepted": True, "message": "Batch dimulai", "settings": settings}
-
-
-
-def _launch_reda_job(req: REDARequest):
-    global REDA_THREAD
-    pgn = _storage_paths()[0]
-    with LOCK:
-        if STATE.get("status") in ("running", "starting"):
-            return False
-        with REDA_LOCK:
-            if REDA_STATE.get("status") in ("starting", "running"):
-                return False
-            if not pgn.exists() or pgn.stat().st_size == 0:
-                REDA_STATE.update(status="failed", error="PGN self-play belum tersedia.")
-                return False
-            REDA_STATE.update(status="starting", progress={}, result=None, error=None, started_at=time.time())
-    def task():
-        with REDA_LOCK:
-            REDA_STATE["status"] = "running"
-        try:
-            from .reda_pipeline import run_reda
-            model_path = RESULTS / "learned_eval.json"
-            def progress(info):
-                with REDA_LOCK:
-                    REDA_STATE["progress"] = dict(info)
-            result = run_reda(pgn, model_path, limit=req.limit, depth=req.depth,
-                time_ms=req.time_ms, max_active=req.max_active,
-                max_abs_weight=req.max_abs_weight, learning_rate=req.learning_rate,
-                l2=req.l2, min_improvement=req.min_improvement, steps=req.steps,
-                match_pairs=req.match_pairs, match_time_ms=req.match_time_ms,
-                match_depth=req.match_depth, min_match_score_rate=req.min_match_score_rate,
-                memory_cap=req.memory_cap, progress=progress)
-            with REDA_LOCK:
-                REDA_STATE["result"] = result
-                REDA_STATE["status"] = "accepted" if result.get("accepted") else "rejected"
-                REDA_STATE["finished_at"] = time.time()
-        except Exception as exc:
-            with REDA_LOCK:
-                REDA_STATE.update(status="failed", error=f"{type(exc).__name__}: {exc}", finished_at=time.time())
-    REDA_THREAD = threading.Thread(target=task, daemon=True, name="kestrel-reda")
-    REDA_THREAD.start()
-    return True
-
-
-
-@app.post("/api/reda/run")
-def run_reda_endpoint(req: REDARequest):
-    with LOCK:
-        if STATE["status"] in ("running", "starting"):
-            raise HTTPException(409, "Self-play sedang berjalan. REDA dapat dimulai setelah batch selesai.")
-    with REDA_LOCK:
-        if REDA_STATE.get("status") in ("starting", "running"):
-            raise HTTPException(409, "REDA job sedang berjalan.")
-    if not _launch_reda_job(req):
-        raise HTTPException(400, "PGN self-play belum tersedia atau REDA gagal dimulai.")
-    return {"accepted": True, "message": "REDA verification started"}
-
-
-
-@app.post("/api/reda/rollback")
-def rollback_reda():
-    import shutil
-    with LOCK:
-        if STATE.get("status") in ("running", "starting"):
-            raise HTTPException(409, "Self-play sedang berjalan; hentikan batch sebelum rollback.")
-        with REDA_LOCK:
-            if REDA_STATE.get("status") in ("running", "starting"):
-                raise HTTPException(409, "REDA sedang berjalan; tunggu hingga selesai.")
-            current = RESULTS / "learned_eval.json"
-            backup = RESULTS / "learned_eval.json.reda_backup"
-            if not backup.exists():
-                raise HTTPException(404, "Rollback checkpoint belum tersedia.")
-            restore_tmp = RESULTS / "learned_eval.json.rollback_tmp"
-            shutil.copy2(backup, restore_tmp)
-            os.replace(restore_tmp, current)
-            REDA_STATE.update(status="rolled_back", error=None, finished_at=time.time(),
-                             result={"rolled_back": True, "restored_from": str(backup)})
-    return {"accepted": True, "message": "Previous learned-eval checkpoint restored."}
 
 
 
@@ -526,9 +409,6 @@ def _launch_train_job(req: TrainRequest) -> bool:
             return False
         if STATE["status"] in ("running", "starting"):
             return False
-        with REDA_LOCK:
-            if REDA_STATE.get("status") in ("starting", "running"):
-                return False
         settings = {"mode": req.mode, "generations": req.generations,
                     "games": req.games, "skill": req.skill,
                     "stockfish_time_ms": req.stockfish_time_ms,
@@ -595,7 +475,7 @@ def _launch_train_job(req: TrainRequest) -> bool:
 @app.post("/api/train")
 def train(req: TrainRequest):
     if not _launch_train_job(req):
-        raise HTTPException(409, "Training/self-play/REDA sedang berjalan; tunggu hingga selesai.")
+        raise HTTPException(409, "Training/self-play sedang berjalan; tunggu hingga selesai.")
     label = ("Cross-engine Kestrel vs Stockfish" if req.mode == "cross_engine"
              else "Trainer unified selfplay")
     return {"accepted": True, "message": f"{label} dimulai",

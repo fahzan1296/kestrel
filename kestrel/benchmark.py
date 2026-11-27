@@ -31,11 +31,14 @@ SPECIAL_MOVE_SUITE = [
 _KIWIPEDE = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
 
 
-def tactical_suite(time_ms=3000, node_limit=200000) -> dict:
-    """TacticalAccuracy = CorrectBestMove / TotalPositions."""
+def tactical_suite(time_ms=3000, node_limit=200000, net=None) -> dict:
+    """TacticalAccuracy = CorrectBestMove / TotalPositions.
+
+    ``net=None`` memakai checkpoint baseline bawaan (evaluator TinyNNUE).
+    """
     results = []
     for fen, expect, desc in TACTICAL_SUITE:
-        s = Searcher(node_limit=node_limit, time_ms=time_ms)
+        s = Searcher(net=net, node_limit=node_limit, time_ms=time_ms)
         mv, info = s.best_move(chess.Board(fen))
         got = mv.uci() if mv else None
         ok = got == expect
@@ -60,10 +63,10 @@ def special_move_suite() -> dict:
             "results": results}
 
 
-def performance_suite(node_budget=50000) -> dict:
+def performance_suite(node_budget=50000, net=None) -> dict:
     """NPS single-search dan nodes/move pada posisi kiwipete (Sec. 28)."""
     b = chess.Board(_KIWIPEDE)
-    s = Searcher(node_limit=node_budget, time_ms=600000)
+    s = Searcher(net=net, node_limit=node_budget, time_ms=600000)
     t0 = time.monotonic()
     s.best_move(b.copy())
     dt = time.monotonic() - t0
@@ -118,11 +121,11 @@ def parallel_performance_suite(node_budget=50000, workers: int = 2) -> dict:
             "scaling_efficiency": round(eff, 3)}
 
 
-def evaluation_consistency(samples=200) -> dict:
-    """Check White-relative evaluator antisymmetry across reachable positions.
+def evaluation_consistency(samples=200, net=None) -> dict:
+    """Antisimetri evaluator: posisi vs mirror-nya harus berlawanan tanda.
 
-    There is no incremental evaluator yet, so the old zero-drift placeholder was
-    misleading. A position and its color/rank mirror should have opposite scores.
+    2.0: TinyNNUE memakai perspektif STM sehingga antisimetri dijamin BY
+    KONSTRUKSI — drift yang diukur harus 0 eksak untuk semua posisi.
     """
     import random
     from .eval import evaluate
@@ -137,7 +140,7 @@ def evaluation_consistency(samples=200) -> dict:
         board.push(move)
         if not board.is_valid():
             continue
-        drift = abs(evaluate(board) + evaluate(board.mirror()))
+        drift = abs(evaluate(board, net) + evaluate(board.mirror(), net))
         max_drift = max(max_drift, drift)
         checked += 1
     return {"samples": checked, "max_drift": max_drift,

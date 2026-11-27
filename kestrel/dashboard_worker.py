@@ -7,13 +7,14 @@ import random
 import time
 from collections.abc import Callable
 from functools import partial
+from pathlib import Path as _Path
 from typing import Any
 
 import chess
 import chess.pgn
 
 from .arena import OPENINGS, Player
-from .learning import OutcomeModel
+from .nnue import TinyNNUE, load_default
 
 
 def _search_info(info: dict[str, Any], emit: Callable[..., None], is_white: bool) -> None:
@@ -27,7 +28,7 @@ def _search_info(info: dict[str, Any], emit: Callable[..., None], is_white: bool
 
 def run_game_worker(game_id: int, seed: int, time_ms: int, max_depth: int,
                    max_plies: int, event_queue, start_fen: str | None = None,
-                   batch_id: int | None = None, learned_path: str | None = None,
+                   batch_id: int | None = None, net_path: str | None = None,
                    book_path: str | None = None, min_depth: int = 0,
                    grace_ms: int = 600, temperature: float = 0.25,
                    book_max_plies: int | None = None,
@@ -53,16 +54,13 @@ def run_game_worker(game_id: int, seed: int, time_ms: int, max_depth: int,
     game.headers["Black"] = f"Kestrel B #{game_id}"
     node = game
     rng = random.Random(seed)
-    # Do not feed an untrained random MLP into evaluation: it adds arbitrary
-    # position/color noise. The handcrafted evaluator is the clean baseline.
-    net = None
-    learned = OutcomeModel()
-    from pathlib import Path as _Path
-    model_path = (_Path(learned_path) if learned_path else
-                  _Path(__file__).resolve().parent.parent / "results" / "learned_eval.json")
-    if model_path.exists():
+    # 2.0: worker SELALU memakai net TinyNNUE terlatih — champion (bila ada)
+    # atau checkpoint baseline bawaan paket. Tidak ada jalur "tanpa net".
+    if net_path and _Path(net_path).exists():
         with contextlib.suppress(ValueError, KeyError, TypeError):
-            learned.load(model_path)
+            net = TinyNNUE.load(net_path)
+    else:
+        net = load_default()
     # 1.6: buku opening statistik opsional (pengetahuan hasil self-play).
     # 1.7: batas book dari config [knowledge] tidak lagi diabaikan
     # (bugfix: worker membangun KnowledgeBase dengan default semua).
@@ -81,14 +79,14 @@ def run_game_worker(game_id: int, seed: int, time_ms: int, max_depth: int,
         except Exception:
             book = None
     worker_kwargs: dict[str, Any] = {
-        "time_ms": time_ms, "max_depth": max_depth, "learned": learned,
+        "time_ms": time_ms, "max_depth": max_depth, "net": net,
         "min_depth": min_depth, "grace_ms": grace_ms, "book": book,
         # 1.8: default 0/0 — selfplay korpus tetap deterministik; pemainan
         # nyata mengaktifkan ekstensi waktu lewat config.
         "hard_ext_ms": int(hard_ext_ms), "hard_ext_max": int(hard_ext_max),
     }
-    white = Player("Kestrel", net=net, **worker_kwargs)
-    black = Player("Kestrel", net=net, **worker_kwargs)
+    white = Player("Kestrel", **worker_kwargs)
+    black = Player("Kestrel", **worker_kwargs)
     plies = 0
     game_start_time = time.monotonic()
     forfeit_result = None

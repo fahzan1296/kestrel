@@ -1,8 +1,12 @@
-# KESTREL 1.6 — konfigurasi terpusat (format TOML).
+# KESTREL 2.0 — konfigurasi terpusat (format TOML).
 # Semua komponen (CLI `python -m kestrel.cli`, trainer unified, dashboard,
 # bot Lichess) membaca file ini. Nilai di sini menimpa default di
-# kestrel/config.py; flag CLI menimpa nilai di sini per pemanggilan —
-# tidak perlu 1x konfigurasi per 1 eksperimen lagi.
+# kestrel/config.py; flag CLI menimpa nilai di sini per pemanggilan.
+#
+# KEAMANAN: token Lichess TIDAK disimpan di file ini. Gunakan environment
+# variable KESTREL_LICHESS_TOKEN (atau flag --token). Token yang pernah
+# tertulis di config dianggap terekspos — revoke di lichess.org/account/
+# oauth/token dan buat token baru dengan scope bot:play.
 
 [search]
 # Jaminan kedalaman: setiap langkah menyelesaikan setidaknya `min_depth`,
@@ -17,18 +21,17 @@ use_null_move = true
 use_lmr = true
 use_lmp = true
 check_extension = true
-# 1.8: ekstensi waktu posisi sulit — bila budget habis saat depth jaminan
-# belum tercapai, ATAU best move root tidak stabil/skor berayun antar
-# iterasi, budget diperpanjang hard_ext_ms (maks hard_ext_max kali per
-# langkah). Budget node tidak pernah dilonggar; budget < ambang minimum
-# tidak diekstensi.
+# Ekstensi waktu posisi sulit — bila budget habis saat depth jaminan belum
+# tercapai, ATAU best move root tidak stabil/skor berayun antar iterasi,
+# budget diperpanjang hard_ext_ms (maks hard_ext_max kali per langkah).
+# Budget node tidak pernah dilonggar; budget < ambang minimum tidak diekstensi.
 hard_ext_ms = 5000
 hard_ext_max = 1
 hard_ext_min_budget_ms = 500
 
 [selfplay]
 # Sumber utama budget trainer unified (generasi memakai nilai ini).
-games_per_batch = 10000
+games_per_batch = 100
 concurrency = 2
 time_ms = 150
 max_depth = 20
@@ -40,36 +43,23 @@ opening_diversity_plies = 12
 tt_size = 262144
 use_book = true        # langkah pembuka dari knowledge base
 
-[learning]
-epochs = 10
-lr = 0.015
-batch_size = 64
-patience = 4
+[nnue]
+# Training evaluator TinyNNUE per generasi (menggantikan [learning]/[reda] lama).
+# Target = alpha * skor search (komentar PGN self-play; teacher klasik sebagai
+# fallback) + (1-alpha) * sinyal hasil game.
+epochs = 12
+lr = 0.05
+batch_size = 256
+patience = 3
 validation_fraction = 0.20
 seed = 42
 max_samples_per_game = 120
-# 1.8: pembelajaran lebih efektif & efisien
-warm_start = true    # lanjutkan dari bobot champion, bukan dari nol
-lr_decay = 0.85      # learning rate menurun 15% per epoch (konvergensi halus)
-class_balance = true # bobot kelas hasil sebanding frekuensi terbalik
-
-[reda]
-enabled = true
-max_active_features = 3
-max_abs_residual_weight = 0.02
-learning_rate = 0.01
-l2 = 0.002
-min_validation_improvement = 0.00001
-verification_depth = 12
-verification_time_ms = 1500
-max_candidate_positions_per_batch = 24
-max_tracked_positions = 100000
-verification_steps = 160
-auto_after_batch = false   # dashboard checkbox lama (tetap kompatibel)
-match_pairs = 4
-match_time_ms = 150
-match_depth = 8
-min_match_score_rate = 0.35
+warm_start = true          # lanjutkan dari bobot champion
+lr_decay = 0.7             # lr * lr_decay^epoch per epoch
+distill_weight = 0.75      # alpha: bobot skor search vs hasil game
+outcome_scale_cp = 350.0   # skala sinyal hasil game (centipawn)
+distill_clip_cp = 1200.0   # clip target skor search
+teacher_fallback = true    # label teacher utk posisi tanpa komentar skor
 
 [eval]
 # Verifikasi otomatis champion vs challenger, setiap generasi trainer.
@@ -90,7 +80,7 @@ min_nps_ratio = 0.60
 seed = 2024
 
 [train]
-# Loop unified: selfplay -> knowledge -> learning -> REDA -> verify -> promote.
+# Loop unified: selfplay -> knowledge -> nnue -> verify -> promote.
 generations = 10
 auto_promote = true
 keep_last_checkpoints = 5
@@ -116,7 +106,7 @@ path = ""
 threads = 1
 hash_mb = 128
 
-# ---------------- 1.7: cross-engine (Kestrel vs Stockfish) -------------------
+# ---------------- cross-engine (Kestrel vs Stockfish) -------------------
 [cross]
 games_per_batch = 20
 skill = 5                # Skill Level Stockfish awal (0..20)
@@ -136,8 +126,8 @@ grace_ms = 600
 use_book = true
 
 [lichess]
-# Fitur "jadi AI Lichess": python -m kestrel.cli lichess --token XXX
-# (atau env KESTREL_LICHESS_TOKEN — JANGAN pernah bagikan screenshot token!)
+# Token dibaca dari env KESTREL_LICHESS_TOKEN atau flag --token —
+# JANGAN pernah menuliskan token ke dalam file ini.
 token = ""
 username = "Azchess-1"
 accept_bot = true
@@ -150,7 +140,7 @@ move_time_ms = 1000
 max_depth = 18
 min_depth = 10            # jaminan depth tinggi saat bermain online
 grace_ms = 1500
-# 1.8: posisi sulit saat bermain mendapat waktu ekstra (+5 detik, 1x/langkah)
+# posisi sulit saat bermain mendapat waktu ekstra (+5 detik, 1x/langkah)
 hard_ext_ms = 5000
 hard_ext_max = 1
 book_moves = true
@@ -178,6 +168,3 @@ database = "results/kestrel.db"
 pgn_directory = "results/"
 results_dir = "results"
 pgn_file = "results/games.pgn"
-
-# Catatan: section lama 1.4/1.5 ([engine], [evaluator], [adaptive], dst.)
-# masih diterima dan dipetakan otomatis oleh kestrel/config.py.

@@ -21,7 +21,7 @@ from pathlib import Path
 from .arena import OPENINGS, Player, elo_delta, sprt, wilson_ci
 from .benchmark import evaluation_consistency, performance_suite, tactical_suite
 from .config import AppConfig
-from .learning import OutcomeModel
+from .nnue import TinyNNUE
 
 
 def _elo_ci(wins: int, draws: int, losses: int) -> tuple[float, float]:
@@ -32,15 +32,18 @@ def _elo_ci(wins: int, draws: int, losses: int) -> tuple[float, float]:
     return (round(elo_delta(lo)), round(elo_delta(hi)))
 
 
-def head_to_head(champion: OutcomeModel | None, challenger: OutcomeModel | None,
+def head_to_head(champion: TinyNNUE | None, challenger: TinyNNUE | None,
                  cfg: AppConfig,
                  verbose: bool = False) -> dict:
-    """Match champion vs challenger: warna & opening seimbang, seed tetap."""
+    """Match champion vs challenger: warna & opening seimbang, seed tetap.
+
+    ``None`` berarti baseline: checkpoint TinyNNUE bawaan paket.
+    """
     champ = Player("Champion", time_ms=cfg.eval.time_ms, max_depth=cfg.eval.max_depth,
-                   learned=champion if champion else None,
+                   net=champion,
                    min_depth=cfg.eval.min_depth, grace_ms=cfg.eval.grace_ms)
     chall = Player("Challenger", time_ms=cfg.eval.time_ms, max_depth=cfg.eval.max_depth,
-                   learned=challenger if challenger else None,
+                   net=challenger,
                    min_depth=cfg.eval.min_depth, grace_ms=cfg.eval.grace_ms)
     games = max(2, int(cfg.eval.games))
     per_opening: dict = {}
@@ -94,11 +97,16 @@ def _play_pair(a: Player, b: Player, fen: str, temperature: float, seed: int):
     return play_game(a, b, fen=fen, temperature=temperature, seed=seed, max_plies=200)
 
 
-def _model_bench(model: OutcomeModel | None, quick: bool) -> dict:
-    """Benchmark taktik + performa + konsistensi untuk satu model."""
-    tac = tactical_suite(time_ms=600 if quick else 1500, node_limit=20000 if quick else 60000)
-    perf = performance_suite(node_budget=8000 if quick else 20000)
-    cons = evaluation_consistency(samples=40 if quick else 120)
+def _model_bench(model: TinyNNUE | None, quick: bool) -> dict:
+    """Benchmark taktik + performa + konsistensi untuk satu net.
+
+    2.0 fix: 1.x menjalankan benchmark pada evaluator default (handcrafted),
+    bukan pada model yang diverifikasi — sekarang net-nya dipakai eksplisit.
+    """
+    tac = tactical_suite(time_ms=600 if quick else 1500,
+                         node_limit=20000 if quick else 60000, net=model)
+    perf = performance_suite(node_budget=8000 if quick else 20000, net=model)
+    cons = evaluation_consistency(samples=40 if quick else 120, net=model)
     return {"tactical_accuracy": tac["accuracy"], "tactical_solved": tac["solved"],
             "tactical_total": tac["total"],
             "nps": perf["nps"], "nodes": perf["nodes"],
@@ -106,7 +114,7 @@ def _model_bench(model: OutcomeModel | None, quick: bool) -> dict:
             "consistency_ok": cons["within_epsilon"]}
 
 
-def verify_challenger(champion: OutcomeModel | None, challenger: OutcomeModel | None,
+def verify_challenger(champion: TinyNNUE | None, challenger: TinyNNUE | None,
                       cfg: AppConfig, quick: bool = False, verbose: bool = False) -> dict:
     """Verifikasi penuh + keputusan. Mengembalikan report JSON-safe."""
     started = time.monotonic()

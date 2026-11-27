@@ -12,7 +12,7 @@ import pytest  # pyright: ignore[reportMissingImports]  # dev dependency
 
 from kestrel.config import AppConfig, load_config, validate_config
 from kestrel.knowledge import KnowledgeBase
-from kestrel.learning import OutcomeModel
+from kestrel.nnue import TinyNNUE
 from kestrel.search import Searcher
 from kestrel.versioning import CheckpointStore
 
@@ -88,34 +88,34 @@ def test_knowledge_learn_and_book():
 
 # ---------------- versioning ----------------
 
-def test_versioning_promote_rollback_prune():
-    with tempfile.TemporaryDirectory() as d:
-        store = CheckpointStore(Path(d) / "results", keep_last=3)
-        assert store.champion_meta()["generation"] == 0
-        model = OutcomeModel()
-        model.weights[0] = 0.123
-        p1 = store.save_candidate(model, 1, {"note": "gen1"})
-        assert p1.exists()
-        meta = store.promote(p1, "test promote")
-        assert meta["generation"] == 1
-        assert store.champion_model_path.exists()
-        loaded = store.load_champion()
-        assert abs(loaded.weights[0] - 0.123) < 1e-6
-        # generasi kedua, lalu rollback
-        p2 = store.save_candidate(model, 2)
-        model2 = OutcomeModel()
-        model2.weights[0] = 0.456
-        p2 = store.save_candidate(model2, 2)
-        store.promote(p2, "gen2")
-        assert abs(store.load_champion().weights[0] - 0.456) < 1e-6
-        store.rollback(steps=1)
-        assert abs(store.load_champion().weights[0] - 0.123) < 1e-6
-        # prune: keep_last=3
-        for gen in range(3, 8):
-            store.save_candidate(model, gen)
-        assert len(store.candidates()) <= 3
-        with pytest.raises(FileNotFoundError):
-            store.promote(Path(d) / "missing.json", "x")
+def test_versioning_promote_rollback_prune(tmp_path):
+    """Versioning checkpoint TinyNNUE: promote/rollback/prune + candidate file."""
+    import numpy as np
+    store = CheckpointStore(tmp_path / "results", keep_last=3)
+    assert store.champion_meta()["generation"] == 0
+    net = TinyNNUE()
+    net.w3[:] = np.float32(0.123)
+    p1 = store.save_candidate(net, 1, {"note": "gen1"})
+    assert p1.exists() and p1.name == "gen_1_nnue.json"
+    meta = store.promote(p1, "test promote")
+    assert meta["generation"] == 1
+    assert store.champion_model_path.exists()
+    loaded = store.load_champion()
+    assert abs(float(loaded.w3[0, 0]) - 0.123) < 1e-6
+    # generasi kedua, lalu rollback
+    net2 = TinyNNUE()
+    net2.w3[:] = np.float32(0.456)
+    p2 = store.save_candidate(net2, 2)
+    store.promote(p2, "gen2")
+    assert abs(float(store.load_champion().w3[0, 0]) - 0.456) < 1e-6
+    store.rollback(steps=1)
+    assert abs(float(store.load_champion().w3[0, 0]) - 0.123) < 1e-6
+    # prune: keep_last=3
+    for gen in range(3, 8):
+        store.save_candidate(net, gen)
+    assert len(store.candidates()) <= 3
+    with pytest.raises(FileNotFoundError):
+        store.promote(tmp_path / "missing.json", "x")
 
 
 # ---------------- verification ----------------
@@ -136,11 +136,11 @@ def test_verify_challenger_rejects_weaker():
     cfg = _tmp_cfg(Path(tempfile.mkdtemp()))
     cfg = cfg.with_overrides("eval", games=2, time_ms=60, max_depth=4,
                              min_depth=2, grace_ms=150)
-    # challenger = model acak-bijas (bobot besar) → harus kalah/ditolak
-    strong = OutcomeModel()
-    weak = OutcomeModel()
-    weak.weights[1] = 5.0   # fitur aneh → evaluasi buruk
-    weak.weights[5] = -5.0
+    # challenger = net dengan bobot L1 di-nol-kan (evaluator datar) vs net
+    # bawaan — keputusan PROMOTE/REJECT tetap dihasilkan mesin verifikasi.
+    strong = TinyNNUE()  # bentuk net valid (verifikasi hanya uji mesin keputusan)
+    weak = strong.copy()
+    weak.w1[:] = 0.0
     rep = verify_challenger(strong, weak, cfg, quick=True)
     assert rep["decision"] in ("REJECT", "PROMOTE")  # 2 game bisa berisik
     assert "match" in rep and "challenger_bench" in rep
@@ -161,16 +161,9 @@ def test_trainer_one_generation(tmp_path):
     gen = rep["generations"][0]
     assert gen["selfplay_ok"]
     assert "knowledge" in gen["stages"]
+    assert "nnue" in gen["stages"]
     results = cfg.results_path
-    # 1.8: kandidat selalu disimpan, tapi champion model hanya ditulis bila
-    # verifikasi PROMOTE. Kandidat REJECT adalah hasil valid, bukan kegagalan.
-    candidate_path = Path(gen["candidate"])
-    assert candidate_path.exists(), "checkpoint kandidat harus dibuat"
-    if gen.get("promoted"):
-        assert (results / "learned_eval.json").exists()
-    else:
-        assert gen["stages"]["verification"]["decision"] == "REJECT"
-        assert not (results / "learned_eval.json").exists()
+    assert (results / "nnue_eval.json").exists()
     assert (results / "champion.json").exists()
     assert (results / "training_log.jsonl").exists()
     ver_files = list(results.glob("verification_gen_*.json"))

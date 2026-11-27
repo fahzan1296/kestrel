@@ -32,7 +32,7 @@ import chess
 import chess.pgn
 
 from .arena import OPENINGS, Player
-from .learning import OutcomeModel
+from .nnue import TinyNNUE, load_default
 from .stockfish import StockfishOpponent
 
 _WORKER: dict[str, Any] = {}   # state per proses worker (event stop, dsb.)
@@ -56,17 +56,19 @@ def _result_of(board: chess.Board) -> tuple[str, str]:
             outcome.termination.name if outcome else "Draw")
 
 
-def _load_models(learned_path: str | None, book_path: str | None):
-    learned = OutcomeModel()
-    if learned_path and Path(learned_path).exists():
+def _load_models(net_path: str | None, book_path: str | None):
+    net: TinyNNUE | None = None
+    if net_path and Path(net_path).exists():
         with contextlib.suppress(ValueError, KeyError, TypeError, OSError):
-            learned.load(Path(learned_path))
+            net = TinyNNUE.load(Path(net_path))
+    if net is None:
+        net = load_default()
     book = None
     if book_path and Path(book_path).exists():
         with contextlib.suppress(Exception):
             from .knowledge import KnowledgeBase
             book = KnowledgeBase(book_path)
-    return learned, book
+    return net, book
 
 
 def _worker_init(stop_event) -> None:
@@ -85,8 +87,8 @@ def _play_cross_game(task: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {"index": index, "ok": False}
     try:
         game_id = index + 1
-        learned, book = _load_models(task.get("learned_path"),
-                                     task.get("book_path"))
+        net, book = _load_models(task.get("net_path"),
+                                task.get("book_path"))
         rng = random.Random(task["seed"])
         kestrel_white = bool(task["kestrel_white"])
         skill = int(task["skill"])
@@ -109,7 +111,7 @@ def _play_cross_game(task: dict[str, Any]) -> dict[str, Any]:
         depth_sum = 0
         book_moves = 0
 
-        kestrel = Player("Kestrel", learned=learned, book=book,
+        kestrel = Player("Kestrel", net=net, book=book,
                          time_ms=task["time_ms"], max_depth=task["max_depth"],
                          min_depth=task["min_depth"], grace_ms=task["grace_ms"],
                          seed=task["seed"])
@@ -210,7 +212,7 @@ def run_cross_engine_games(*, games: int, time_ms: int, max_plies: int,
                            pgn_path: str | Path, skill: int = 5,
                            max_depth: int = 64,
                            stockfish_path: str | None = None,
-                           learned_path: str | Path | None = None,
+                           net_path: str | Path | None = None,
                            book_path: str | Path | None = None,
                            stockfish_time: float = 0.2,
                            min_depth: int = 0, grace_ms: int = 600,
@@ -261,7 +263,7 @@ def run_cross_engine_games(*, games: int, time_ms: int, max_plies: int,
                 "grace_ms": grace_ms, "seed": seed,
                 "stockfish_path": stockfish_path,
                 "stockfish_time": stockfish_time,
-                "learned_path": learned_path and str(learned_path),
+                "net_path": net_path and str(net_path),
                 "book_path": book_path and str(book_path)}
 
     def tally(out: dict[str, Any]) -> None:
@@ -463,7 +465,7 @@ def run_cross_engine_training(cfg, *, run_id: str, skill: int = 5,
             max_depth=work.selfplay.max_depth,
             max_plies=work.selfplay.max_plies, pgn_path=work.pgn_path,
             skill=skill, stockfish_path=stockfish_path,
-            learned_path=(str(store.champion_model_path)
+            net_path=(str(store.champion_model_path)
                           if store.champion_model_path.exists() else None),
             book_path=(str(work.knowledge_db_path) if use_book else None),
             stockfish_time=stockfish_time_ms / 1000.0,

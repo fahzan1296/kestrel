@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -189,35 +188,48 @@ def _open_knowledge(cfg: AppConfig):
                          cfg.knowledge.book_min_games)
 
 
-def cmd_reda(args) -> int:
-    """REDA satu-tembak pada korpus yang ada (config dari section [reda])."""
-    from .reda_pipeline import run_reda
+def cmd_nnue(args) -> int:
+    """Distilasi satu-tembak TinyNNUE dari korpus PGN, atau info net aktif."""
     cfg = _load_or_exit(args)
     store = CheckpointStore(cfg.results_path)
-    if not cfg.pgn_path.exists() or cfg.pgn_path.stat().st_size == 0:
-        print("PGN korpus belum ada; jalankan `kestrel selfplay` dulu.")
+    if args.action == "info":
+        net = store.load_champion()
+        print(json.dumps({"kind": net.kind, "params": net.params(),
+                          "champion_file": str(store.champion_model_path),
+                          "champion_exists": store.has_trained_champion(),
+                          "metadata": net.metadata}, indent=2, default=str))
+        return 0
+    paths = [str(p_) for p_ in (args.pgn or [str(cfg.pgn_path)])]
+    missing = [p_ for p_ in paths if not Path(p_).exists()]
+    if missing:
+        print(f"PGN tidak ditemukan: {missing}")
         return 1
-    rep = run_reda(cfg.pgn_path, store.champion_model_path,
-                   limit=cfg.reda.max_candidate_positions_per_batch,
-                   depth=cfg.reda.verification_depth,
-                   time_ms=cfg.reda.verification_time_ms,
-                   max_active=cfg.reda.max_active_features,
-                   max_abs_weight=cfg.reda.max_abs_residual_weight,
-                   learning_rate=cfg.reda.learning_rate, l2=cfg.reda.l2,
-                   min_improvement=cfg.reda.min_validation_improvement,
-                   steps=cfg.reda.verification_steps,
-                   memory_cap=cfg.reda.max_tracked_positions,
-                   match_pairs=args.match_pairs,
-                   match_time_ms=args.match_time_ms,
-                   match_depth=args.match_depth,
-                   min_match_score_rate=cfg.eval.min_score_rate if args.match_pairs else 0.35)
-    print(json.dumps(rep, indent=2, default=str))
-    return 0 if rep.get("accepted") else 1
+    from .nnue_train import train_from_pgn
+    base = None
+    if args.base_model:
+        from .nnue import TinyNNUE
+        base = TinyNNUE.load(args.base_model)
+    elif store.has_trained_champion():
+        base = store.load_champion()
+    kwargs = {}
+    if args.epochs is not None:
+        kwargs["epochs"] = args.epochs
+    if args.lr is not None:
+        kwargs["lr"] = args.lr
+    net, report = train_from_pgn(paths, base=base, **kwargs)
+    out = Path(args.output) if args.output else store.champion_model_path
+    net.save(out, {"trained_by": "cli nnue distill"})
+    print(json.dumps({"output": str(out), "params": net.params(),
+                      "samples": report["samples"],
+                      "best_epoch": report["best_epoch"],
+                      "validation_mse_cp2": report["best_validation_mse_cp2"]},
+                     indent=2))
+    return 0
 
 
 def cmd_eval(args) -> int:
     """Head-to-head terperinci dua model (default: champion vs kandidat terakhir)."""
-    from .learning import OutcomeModel
+    from .nnue import TinyNNUE
     from .verification import report_markdown, verify_challenger
     cfg = _load_or_exit(args)
     store = CheckpointStore(cfg.results_path)
@@ -231,10 +243,10 @@ def cmd_eval(args) -> int:
     if cand_path is None:
         cands = store.candidates()
         cand_path = str(cands[-1]) if cands else None
-    champ_model = OutcomeModel().load(champ_path) if champ_path else None
-    cand_model = OutcomeModel().load(cand_path) if cand_path else None
-    print(f"champion : {champ_path or '(handcrafted baseline)'}")
-    print(f"challenger: {cand_path or '(handcrafted baseline)'}")
+    champ_model = TinyNNUE.load(champ_path) if champ_path else None
+    cand_model = TinyNNUE.load(cand_path) if cand_path else None
+    print(f"champion : {champ_path or '(baseline bawaan TinyNNUE)'}")
+    print(f"challenger: {cand_path or '(baseline bawaan TinyNNUE)'}")
     rep = verify_challenger(champ_model, cand_model, cfg, verbose=not args.quiet)
     tag = f"{int(time.time())}"
     out = cfg.results_path / f"eval_manual_{tag}.json"
@@ -249,11 +261,11 @@ def cmd_eval(args) -> int:
 def cmd_verify(args) -> int:
     """Suite bukti kekuatan & konsistensi: benchmark penuh + match vs baseline.
 
-    Champion aktif (atau kandidat --challenger) diadu vs engine baseline
-    handcrafted (tanpa model), ditambah akurasi taktik, NPS, dan konsistensi.
+    Champion aktif (atau kandidat --challenger) diadu vs net baseline bawaan
+    paket (checkpoint terlatih), ditambah akurasi taktik, NPS, konsistensi.
     """
     from .benchmark import evaluation_consistency, performance_suite, tactical_suite
-    from .learning import OutcomeModel
+    from .nnue import TinyNNUE
     from .verification import report_markdown, verify_challenger
     cfg = _load_or_exit(args)
     store = CheckpointStore(cfg.results_path)
@@ -261,7 +273,7 @@ def cmd_verify(args) -> int:
     model_path = args.challenger or (str(store.champion_model_path)
                                      if store.champion_model_path.exists() else None)
     if model_path:
-        model = OutcomeModel().load(model_path)
+        model = TinyNNUE.load(model_path)
     rep = verify_challenger(None, model, cfg, quick=args.quick, verbose=not args.quiet)
     out = cfg.results_path / f"verify_{int(time.time())}.json"
     out.write_text(json.dumps(rep, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -275,7 +287,7 @@ def cmd_verify(args) -> int:
         rep["full_benchmark"] = {"report": str(out2),
                                  "tactical_accuracy": bench["tactical"]["accuracy"]}
         out.write_text(json.dumps(rep, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(json.dumps({"decision": rep["decision"], "vs": "handcrafted baseline",
+    print(json.dumps({"decision": rep["decision"], "vs": "baseline bawaan TinyNNUE",
                       "model": model_path or "(baseline)",
                       "score_rate": rep["match"]["score_rate"],
                       "elo_delta": rep["match"]["elo_delta"], "sprt": rep["match"]["sprt"],
@@ -336,12 +348,11 @@ def cmd_model(args) -> int:
     cfg = _load_or_exit(args)
     store = CheckpointStore(cfg.results_path, keep_last=cfg.train.keep_last_checkpoints)
     if args.action == "show":
-        model = store.load_champion()
+        net = store.load_champion()
         print(json.dumps({"summary": store.summary(),
-                          "weights": model.weights.tolist(),
-                          "bias": model.bias,
-                          "micro_weights": model.micro_weights.tolist(),
-                          "micro_bias": model.micro_bias}, indent=2))
+                          "kind": net.kind,
+                          "params": net.params(),
+                          "metadata": net.metadata}, indent=2, default=str))
         return 0
     if args.action == "history":
         print(json.dumps(store.champion_meta(), indent=2, default=str))
@@ -371,11 +382,13 @@ def cmd_lichess(args) -> int:
         cfg = cfg.with_overrides("lichess", max_games=args.max_games)
     if args.concurrency is not None:
         cfg = cfg.with_overrides("lichess", concurrency=args.concurrency)
-    token = cfg.lichess.token or os.environ.get("KESTREL_LICHESS_TOKEN", "")
+    import os as _os
+    token = cfg.lichess.token or _os.environ.get("KESTREL_LICHESS_TOKEN", "")
     if not token and not args.dry_run:
-        print("Token Lichess belum ada. Set [lichess] token di config.toml, "
-              "--token, atau env KESTREL_LICHESS_TOKEN. Buat token di "
-              "https://lichess.org/account/oauth/token dengan scope bot play.")
+        print("Token Lichess belum ada. Set environment variable "
+              "KESTREL_LICHESS_TOKEN atau --token. Buat token di "
+              "https://lichess.org/account/oauth/token dengan scope bot:play. "
+              "JANGAN menulis token ke config.toml.")
         return 2
     bot = LichessBot(cfg, token=token, dry_run=args.dry_run)
     try:
@@ -397,7 +410,7 @@ def cmd_dashboard(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="kestrel",
-        description="KESTREL 1.7 — engine catur + training unified + cross-engine + bot Lichess")
+        description="KESTREL 2.0 — evaluator AI TinyNNUE + training unified + cross-engine + bot Lichess")
     sub = ap.add_subparsers(dest="command")
 
     p = sub.add_parser("config", help="lihat/validasi/config template")
@@ -407,7 +420,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config")
     p.set_defaults(func=cmd_config)
 
-    p = sub.add_parser("train", help="pipeline unified: selfplay→knowledge→learning→REDA→eval→promote")
+    nn = sub.add_parser("nnue", help="evaluator AI TinyNNUE: distill/info")
+    p = nn
+    p.add_argument("action", choices=["distill", "info"], nargs="?", default="info")
+    p.add_argument("pgn", nargs="*", help="file PGN korpus (untuk distill)")
+    p.add_argument("--epochs", type=int)
+    p.add_argument("--lr", type=float)
+    p.add_argument("--output", default=None, help="path checkpoint output")
+    p.add_argument("--base-model", default=None, help="checkpoint warm start")
+    p.add_argument("--config")
+    p.set_defaults(func=cmd_nnue)
+
+    p = sub.add_parser("train", help="pipeline unified: selfplay→knowledge→nnue→eval→promote")
     _add_common_overrides(p)
     p.add_argument("--generations", type=int, help="jumlah generasi training")
     p.add_argument("--eval-games", type=int, help="jumlah game verifikasi per generasi")
@@ -437,13 +461,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_overrides(p)
     p.add_argument("--learn", action="store_true", help="perbarui knowledge base setelahnya")
     p.set_defaults(func=cmd_selfplay)
-
-    p = sub.add_parser("reda", help="REDA satu-tembak pada korpus yang ada")
-    p.add_argument("--config")
-    p.add_argument("--match-pairs", type=int, default=4)
-    p.add_argument("--match-time-ms", type=int, default=150)
-    p.add_argument("--match-depth", type=int, default=8)
-    p.set_defaults(func=cmd_reda)
 
     p = sub.add_parser("eval", help="match detail champion vs kandidat/baseline")
     p.add_argument("--champion")

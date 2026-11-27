@@ -66,36 +66,28 @@ class SearchConfig:
 
 
 @dataclass
-class LearningConfig:
-    epochs: int = 10
-    lr: float = 0.015
-    batch_size: int = 64
-    patience: int = 4
+class NNUEConfig:
+    """Training TinyNNUE per generasi (distilasi + hasil game).
+
+    2.0: menggantikan [learning] (OutcomeModel linear) dan [reda] (adapter
+    eksperimental) dengan satu skema pelatihan jaringan utuh:
+    - warm start dari bobot champion, lr decay per epoch
+    - target = alpha*skor search (komentar PGN / teacher) + hasil game
+    - holdout level-game + early stop pada MSE validasi
+    """
+    epochs: int = 12
+    lr: float = 0.05
+    batch_size: int = 256
+    patience: int = 3
     validation_fraction: float = 0.20
     seed: int = 42
     max_samples_per_game: int = 120
-    # 1.8: pembelajaran lebih efektif — warm start dari bobot champion,
-    # decay learning rate per epoch, dan pembobotan kelas hasil (1-0/draw/0-1)
-    # sebanding frekuensi terbalik agar korpus timpang tidak membiaskan model.
     warm_start: bool = True
-    lr_decay: float = 0.85          # lr_epoch = lr * lr_decay^epoch (1.0 = mati)
-    class_balance: bool = True
-
-
-@dataclass
-class RedaConfig:
-    enabled: bool = True
-    max_active_features: int = 3
-    max_abs_residual_weight: float = 0.02
-    learning_rate: float = 0.01
-    l2: float = 0.002
-    min_validation_improvement: float = 1e-5
-    verification_depth: int = 12
-    verification_time_ms: int = 1500
-    max_candidate_positions_per_batch: int = 24
-    max_tracked_positions: int = 100000
-    verification_steps: int = 160
-    auto_after_batch: bool = False
+    lr_decay: float = 0.7              # lr_epoch = lr * lr_decay^epoch
+    distill_weight: float = 0.75       # alpha: bobot skor search vs outcome
+    outcome_scale_cp: float = 350.0    # skala sinyal hasil game (centipawn)
+    distill_clip_cp: float = 1200.0    # clip target skor search
+    teacher_fallback: bool = True      # label teacher utk posisi tanpa komentar
 
 
 @dataclass
@@ -120,8 +112,8 @@ class EvalConfig:
 
 @dataclass
 class TrainConfig:
-    """Loop training unified: selfplay -> knowledge -> learning -> REDA ->
-    verification -> promote/rollback, diulang per generasi."""
+    """Loop training unified: selfplay -> knowledge -> nnue -> verification ->
+    promote/rollback, diulang per generasi."""
     generations: int = 10
     auto_promote: bool = True
     rollback_on_reject: bool = True
@@ -221,8 +213,7 @@ class StorageConfig:
 class AppConfig:
     selfplay: SelfplayConfig = field(default_factory=SelfplayConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
-    learning: LearningConfig = field(default_factory=LearningConfig)
-    reda: RedaConfig = field(default_factory=RedaConfig)
+    nnue: NNUEConfig = field(default_factory=NNUEConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
@@ -254,7 +245,7 @@ class AppConfig:
 
     @property
     def champion_model_path(self) -> Path:
-        return self.results_path / "learned_eval.json"
+        return self.results_path / "nnue_eval.json"
 
     @property
     def champion_meta_path(self) -> Path:
@@ -288,7 +279,7 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             raise ValueError(f"config.toml tidak valid: {target}") from exc
         mapping = {
             "selfplay": SelfplayConfig, "search": SearchConfig,
-            "learning": LearningConfig, "reda": RedaConfig,
+            "nnue": NNUEConfig,
             "eval": EvalConfig, "train": TrainConfig,
             "knowledge": KnowledgeConfig, "arena": ArenaConfig,
             "cross": CrossConfig,
@@ -297,6 +288,20 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         for section, cls in mapping.items():
             if section in data and isinstance(data[section], dict):
                 setattr(cfg, section, _coerce(cls, data[section]))
+        # Kompatibilitas: [learning] lama (1.x) dipetakan ke [nnue]
+        if "learning" in data and isinstance(data["learning"], dict):
+            leg = data["learning"]
+            patch = {}
+            if "epochs" in leg:
+                patch["epochs"] = leg["epochs"]
+            if "batch_size" in leg:
+                patch["batch_size"] = leg["batch_size"]
+            if "seed" in leg:
+                patch["seed"] = leg["seed"]
+            if "max_samples_per_game" in leg:
+                patch["max_samples_per_game"] = leg["max_samples_per_game"]
+            if patch:
+                cfg.nnue = dataclasses.replace(cfg.nnue, **patch)
         # 1.5 kompatibilitas: [engine] lama memetakan ke [search]
         if "engine" in data and isinstance(data["engine"], dict):
             eng = data["engine"]
@@ -348,7 +353,12 @@ def validate_config(cfg: AppConfig) -> list[str]:
          "search.hard_ext_* harus non-negatif"),
         (cfg.lichess.hard_ext_ms >= 0 and cfg.lichess.hard_ext_max >= 0,
          "lichess.hard_ext_* harus non-negatif"),
-        (0.0 < cfg.learning.lr_decay <= 1.0, "learning.lr_decay dalam (0,1]"),
+        (0.0 < cfg.nnue.lr_decay <= 1.0, "nnue.lr_decay dalam (0,1]"),
+        (0.0 <= cfg.nnue.distill_weight <= 1.0, "nnue.distill_weight dalam [0,1]"),
+        (cfg.nnue.distill_clip_cp > 0 and cfg.nnue.outcome_scale_cp > 0,
+         "nnue.distill_clip_cp dan nnue.outcome_scale_cp harus positif"),
+        (cfg.nnue.batch_size >= 8 and cfg.nnue.epochs >= 1,
+         "nnue.batch_size >= 8 dan nnue.epochs >= 1"),
     ]
     for ok, msg in checks:
         if not ok:
