@@ -1,28 +1,42 @@
 """KESTREL — Search Engine.
 
 Negamax + alpha-beta, iterative deepening, transposition table (Zobrist),
-quiescence with capture-only generation + delta pruning, MVV-LVA / killers /
-history ordering, PVS, adaptive null-move, LMR, late-move pruning, check
-extensions (bounded per path), mate-distance pruning, aspiration windows with
-progressive widening, per-node single move generation and a bounded
-white-relative evaluation cache.
+quiescence with capture-only generation + delta/SEE pruning, MVV-LVA /
+killers / butterfly history / continuation history / capture history
+ordering, PVS, adaptive null-move, LMR adaptif (sejarah), late-move pruning,
+futility pruning, internal iterative reduction, check extensions (bounded
+per path), mate-distance pruning, aspiration windows with progressive
+widening, per-node single move generation, bounded white-relative evaluation
+cache, dan ekstensi waktu adaptif untuk posisi sulit.
+
+1.8 upgrade (kekuatan + akurasi, tradeoff kecil yang disengaja):
+- CONTINUATION HISTORY (1-ply): skor quiet move menggabungkan butterfly
+  history dengan riwayat pasangan (langkah sebelumnya, langkah ini).
+- CAPTURE HISTORY: reorder antar capture berdasar riwayat cutoff per
+  (victim, from, to), bukan hanya MVV-LVA statis.
+- Penalti history dua arah: quiet/capture yang dicoba di node yang sama
+  tetap gagal meng-cutoff menerima bonus NEGATIF (gravity), bukan hanya
+  bonus positif untuk langkah yang cutoff.
+- IIR (internal iterative reduction): node dalam tanpa hash move disearch
+  satu ply lebih dangkal — memangkas pencarian buta di subtree tanpa info.
+- LMR adaptif sejarah: langkah quiet ber-sejarah buruk direduksi +1 ply,
+  sejarah sangat baik -1 ply.
+- FUTILITY pruning parent (depth <= 2): quiet move dilewati bila evaluasi
+  statis + margin tidak mungkin mencapai alpha.
+- Null-move R adaptif kedalaman: R=2 (<6), R=3 (6-9), R=4 (>=10).
+- Delta pruning qsearch memakai aproksimasi SEE (victim - attacker).
+- EKSTENSI WAKTU POSISI SULIT: bila budget waktu habis sebelum iterasi
+  selesai pada posisi sulit, ATAU best move root tidak stabil / skor
+  berayun besar antar iterasi, budget diperpanjang ``hard_ext_ms``
+  (default 5000 ms) maksimal ``hard_ext_max`` kali per langkah — hanya
+  untuk budget waktu (budget node tidak pernah dilonggar), dengan
+  ambang budget minimum ``hard_ext_min_budget_ms``; alasan selalu
+  dilaporkan di info.
 
 1.7 upgrade (performa, logika search tetap):
-- Zobrist INKREMENTAL: kunci posisi diperbarui selama push/pop (tabel acak
-  polyglot yang sama, diverifikasi identik bit-per-bit dengan
-  ``chess.polyglot.zobrist_hash``), sehingga tiap node tidak lagi memindai
-  32 bidak untuk hashing. Kunci TT + kunci eval-cache jadi gratis.
-- Transposition table flat-array (indeks = key & mask, kunci penuh
-  diverifikasi saat probe) menggantikan dict + eviksi sampling.
-- Move ordering satu-pass: skor MVV-LVA/killer/history dan flag
-  capture/promotion dihitung sekali per langkah per node (sebelumnya
-  ``board.is_capture`` dibayar dua kali), lalu diurutkan stabil — urutan
-  hasil identik dengan 1.6.
-- Pengecekan draw ber-gate ketat: repetition/50-langkah/material-tak-cukup
-  hanya dipanggil bila halfmove_clock/popcount memungkinkan (tepat, bukan
-  aproksimasi).
-- Tabel LMR pra-hitung (tanpa ``math.log`` di jalur panas).
-- Null-move ``_heavy_material`` via popcount bitboard.
+- Zobrist INKREMENTAL eksak-polyglot, TT flat-array, move ordering
+  satu-pass, draw gate ketat, tabel LMR pra-hitung, null-move
+  ``_heavy_material`` via popcount bitboard.
 """
 
 from __future__ import annotations
@@ -198,7 +212,11 @@ class Searcher:
                  time_ms: int = 1000, max_depth: int = 64, tt_size: int = 1 << 18, learned=None,
                  use_null_move: bool = True, use_lmr: bool = True, on_info=None,
                  use_lmp: bool = True, check_extension: bool = True,
-                 min_depth: int = 0, grace_ms: int = 1000):
+                 min_depth: int = 0, grace_ms: int = 1000,
+                 hard_ext_ms: int = 5000, hard_ext_max: int = 1,
+                 hard_ext_min_budget_ms: int = 500,
+                 use_iir: bool = True, use_futility: bool = True,
+                 use_cont_history: bool = True):
         if int(node_limit) != node_limit or node_limit < 0:
             raise ValueError("node_limit must be a non-negative integer")
         if int(time_ms) != time_ms or time_ms < 1:
@@ -213,6 +231,13 @@ class Searcher:
             raise ValueError("grace_ms must be a non-negative integer")
         if min_depth > max_depth:
             raise ValueError("min_depth cannot exceed max_depth")
+        if int(hard_ext_ms) != hard_ext_ms or hard_ext_ms < 0:
+            raise ValueError("hard_ext_ms must be a non-negative integer")
+        if int(hard_ext_max) != hard_ext_max or hard_ext_max < 0:
+            raise ValueError("hard_ext_max must be a non-negative integer")
+        if (int(hard_ext_min_budget_ms) != hard_ext_min_budget_ms
+                or hard_ext_min_budget_ms < 0):
+            raise ValueError("hard_ext_min_budget_ms must be a non-negative integer")
         self.net = net
         self.learned = learned
         self.node_limit = int(node_limit)
@@ -224,6 +249,15 @@ class Searcher:
         # dilonggar. min_depth=0 menonaktifkan fitur ini.
         self.min_depth = int(min_depth)
         self.grace_ms = int(grace_ms)
+        # 1.8: ekstensi waktu posisi sulit — hanya untuk budget waktu.
+        self.hard_ext_ms = int(hard_ext_ms)
+        self.hard_ext_max = int(hard_ext_max)
+        self.hard_ext_min_budget_ms = int(hard_ext_min_budget_ms)
+        # 1.8: saklar fitur kekuatan (semua default ON, kompatibel mundur
+        # secara API — perilaku search 1.7 berubah by design).
+        self.use_iir = use_iir
+        self.use_futility = use_futility
+        self.use_cont_history = use_cont_history
         # 1.7: TT flat-array (ukuran dibulatkan ke bawah ke pangkat dua).
         size = max(1024, int(tt_size))
         if size & (size - 1):
@@ -233,7 +267,12 @@ class Searcher:
         self.tt: list = [None] * size  # entri: (key, depth, score, bound, best, age)
         self.tt_hits = self.tt_misses = self.cutoffs = self.qnodes = 0
         self.killers: list = [[None, None] for _ in range(128)]
+        # 1.8: kunci history int (turn<<12 | frm<<6 | to) — dict int lebih
+        # cepat daripada tuple. Kunci continuation: prev_frm<<18 |
+        # prev_to<<12 | frm<<6 | to. Kunci capture: victim<<12 | frm<<6 | to.
         self.history: dict = {}
+        self.cont_history: dict = {}
+        self.cap_history: dict = {}
         self.nodes = 0
         self.age = 0
         self.use_null_move = use_null_move
@@ -250,6 +289,10 @@ class Searcher:
         self.soft_time_ms = max(1, int(time_ms * 0.72))
         self._hard_deadline = self.deadline
         self._grace_deadline = self.deadline
+        # 1.8: state ekstensi waktu (direset tiap best_move).
+        self._ext_count = 0
+        self._ext_ms_total = 0
+        self._ext_reasons: list = []
         # Bounded eval cache (white-relative). Keyed by the incremental
         # Zobrist key; positions with a high half-move clock bypass it
         # because draw-value rules become path/clock dependent there.
@@ -456,18 +499,27 @@ class Searcher:
         return pv
 
     # ---------------- move ordering ----------------
-    def _score_moves(self, board: chess.Board, ply: int, tt_move, moves):
+    def _score_moves(self, board: chess.Board, ply: int, tt_move, moves,
+                     prev_key: int = 0):
         """Skor MVV-LVA / TT / killer / history + flag capture/promo sekali jalan.
 
+        1.8: kunci history INT (turn<<12|frm<<6|to) dan dua sumber skor baru:
+        - continuation history 1-ply (pasangan langkah sebelumnya→ini),
+          hanya untuk quiet move dan hanya bila ``prev_key`` > 0;
+        - capture history per (victim, frm, to) untuk reorder antar capture.
+        Skor quiet di-clamp di bawah ambang MVV-LVA terendah agar invariant
+        "capture selalu di atas quiet" tetap terjaga.
+
         Mengembalikan list ``(score, move, capture, promotion, victim)``
-        terurut menurun menurut skor; sort stabel sehingga urutan hasil
-        identik dengan ``sorted(moves, key=score, reverse=True)`` versi 1.6.
-        ``gives_check`` sengaja TIDAK dikonsultasikan di sini (predikat
-        python-chess termahal); kompensasi yang sama dengan catatan 1.6.
+        terurut menurun; sort stabel. ``gives_check`` sengaja TIDAK
+        dikonsultasikan di sini (predikat python-chess termahal).
         """
         killers = self.killers[ply & 127]
         history = self.history
+        cap_history = self.cap_history
+        cont = self.cont_history if (self.use_cont_history and prev_key) else None
         turn = board.turn
+        hbase = 4096 if turn else 0  # turn<<12 (WHITE=1, BLACK=0)
         ep = board.ep_square
         them_co = board.occupied_co[not turn]
         pawns = board.pawns
@@ -488,7 +540,10 @@ class Searcher:
             elif cap:
                 victim = board.piece_type_at(to) or chess.PAWN
                 attacker = board.piece_type_at(frm) or chess.PAWN
-                s = 1_000_000 + PIECE_VALUES[victim] * 10 - PIECE_VALUES[attacker]
+                s = (1_000_000 + PIECE_VALUES[victim] * 10
+                     - PIECE_VALUES[attacker]
+                     + min(cap_history.get((victim << 12) | (frm << 6) | to, 0),
+                           500_000))
             elif promo:
                 s = 900_000
                 victim = 0
@@ -496,7 +551,12 @@ class Searcher:
                 s = 700_000
                 victim = 0
             else:
-                s = history.get((turn, frm, to), 0)
+                hk = hbase | (frm << 6) | to
+                s = history.get(hk, 0)
+                if cont is not None:
+                    s += 2 * cont.get(prev_key | (frm << 6) | to, 0)
+                if s > 990_000:
+                    s = 990_000  # invariant: quiet < capture MVV-LVA terendah
                 victim = 0
             append((s, mv, cap, promo, victim))
         out.sort(key=_ITEM0, reverse=True)
@@ -696,10 +756,17 @@ class Searcher:
         for s0, mv, cap, promo, victim in scored:
             if self.stop:
                 return self._stm(board)
-            # Delta pruning (Section 12); margin covers the cheapest tactical follow-up.
+            # Delta pruning dua-tahap (1.8): tahap murah dulu (1.7), lalu
+            # aproksimasi SEE — biaya attacker (piece_type_at) hanya dibayar
+            # untuk capture yang sudah melewati tahap murah tapi tetap
+            # berpotensi di-prune. Margin 200 menutup taktik termurah.
             if not in_check and cap and not promo:
-                if stand + PIECE_VALUES[victim] + 200 < alpha:
-                    continue
+                pv_val = PIECE_VALUES[victim]
+                if stand + pv_val + 200 < alpha:
+                    att_val = PIECE_VALUES[board.piece_type_at(mv.from_square)
+                                           or chess.PAWN]
+                    if stand + pv_val - att_val + 200 < alpha:
+                        continue
             self._push(board, mv)
             sc = -self.qsearch(board, -beta, -alpha, ply + 1)
             self._pop(board)
@@ -715,7 +782,8 @@ class Searcher:
 
     # ---------------- main negamax ----------------
     def search(self, board: chess.Board, depth: int, alpha: int, beta: int,
-               ply: int = 0, can_null: bool = True, ext_left: int = 24) -> int:
+               ply: int = 0, can_null: bool = True, ext_left: int = 24,
+               prev_key: int = 0) -> int:
         # Depth-zero nodes are counted by qsearch, not twice (once here and
         # again in qsearch). This keeps node budgets, NPS and qnode_ratio honest.
         if depth <= 0:
@@ -763,14 +831,20 @@ class Searcher:
             self.tt_misses += 1
 
         in_check = self._is_check(board)
-        # Null-move pruning (Section 15), guarded utk zugzwang/endgame.
-        # Reduction grows with depth: R=2 shallow, R=3 deep.
+        # IIR (1.8): node tanpa hash move pada depth sedang disearch satu ply
+        # lebih dangkal — informasi TT kosong menandakan subtree yang tidak
+        # pernah dijelajahi serupa, jadi pencarian penuh di sini boros.
+        if (self.use_iir and tt_move is None and not in_check and depth >= 4
+                and ply > 0):
+            depth -= 1
+        # Null-move pruning, guarded utk zugzwang/endgame. Reduction adaptif
+        # kedalaman (1.8): R=2 <6, R=3 6-9, R=4 >=10.
         if (self.use_null_move and can_null and not in_check and ply > 0
                 and depth >= 3 and _heavy_material(board)):
-            r = 3 if depth >= 6 else 2
+            r = 2 if depth < 6 else (3 if depth < 10 else 4)
             self._push_null(board)
             sc = -self.search(board, depth - 1 - r, -beta, -beta + 1, ply + 1, False,
-                              ext_left)
+                              ext_left, prev_key)
             self._pop(board)
             if self.stop:
                 return self._stm(board)
@@ -787,7 +861,18 @@ class Searcher:
                 self._moves_cache[self._zkey] = moves
         if not moves:
             return -(MATE - ply) if in_check else 0
-        scored = self._score_moves(board, ply, tt_move, moves)
+        scored = self._score_moves(board, ply, tt_move, moves, prev_key)
+
+        # Futility pruning setup (1.8): pada depth <= 2, quiet move yang
+        # bahkan dengan margin tidak bisa mencapai alpha dilewati. Posisi
+        # node ini sudah lolos gate draw di pintu masuk dan punya langkah
+        # legal, sehingga evaluasi terminal=False bernilai sama dengan 1.7.
+        fut_base = None
+        fut_margin = 0
+        if (self.use_futility and depth <= 2 and not in_check
+                and -(MATE - 1000) < alpha < MATE - 1000):
+            fut_base = self._stm(board, terminal=False)
+            fut_margin = 60 + 110 * depth
 
         # Check extension: search one ply deeper while in check, bounded by the
         # per-path extension budget so perpetual-check lines must terminate.
@@ -801,46 +886,82 @@ class Searcher:
         push = self._push
         pop = self._pop
         lmr_row = _LMR[depth] if depth < 128 else _LMR[127]
+        hbase = 4096 if board.turn else 0
+        history = self.history
+        cont_history = self.cont_history
+        cap_history = self.cap_history
+        # tried_quiets: kunci butterfly & continuation tiap quiet yang sudah
+        # dicoba; tried_caps: kunci capture history. Dipakai untuk penalti
+        # dua arah saat cutoff (gravity history 1.8).
+        tried_quiets: list = []
+        tried_caps: list = []
         for s0, mv, cap, promo, victim in scored:
             if self.stop:
                 return self._stm(board)
+            frm = mv.from_square
+            to = mv.to_square
             is_quiet = not cap and not promo
             # Late-move pruning: at shallow depth skip excess quiet moves once a
             # real best move exists. Checks and captures are never pruned.
             if (self.use_lmp and is_quiet and not first and quiet_count >= lmp_limit
                     and depth <= 3 and not in_check and alpha > -(MATE - 1000)):
                 continue
+            # Futility pruning (1.8): quiet non-pertama yang statis + margin
+            # tetap di bawah alpha dilewati (tidak pernah utk move pertama).
+            if (fut_base is not None and not first and is_quiet
+                    and fut_base + fut_margin <= alpha):
+                continue
+            # History tried-lists: hanya langkah yang benar-benar disearch
+            # (skip LMP/futility tidak boleh kena penalti cutoff). Kunci
+            # butterfly int hanya relevan utk quiet (capture pakai kunci lain).
+            hk = 0
+            if is_quiet:
+                hk = hbase | (frm << 6) | to
+                tried_quiets.append(hk)
+            elif not promo:
+                tried_caps.append((victim << 12) | (frm << 6) | to)
             do_reduce = False
+            lmr_adjust = 0
             # gives_check is computed lazily, only when reduction is already
             # justified by every other criterion.
             if (self.use_lmr and not first and idx >= 3 and depth >= 3
                     and not in_check and is_quiet and not board.gives_check(mv)):
                 do_reduce = True
+                # LMR adaptif sejarah (1.8): sejarah buruk → reduksi +1,
+                # sejarah sangat baik → reduksi -1.
+                hval = history.get(hk, 0)
+                if hval <= -40_000:
+                    lmr_adjust = 1
+                elif hval >= 400_000 and lmr_row[idx if idx < 128 else 127] > 1:
+                    lmr_adjust = -1
             push(board, mv)
+            child_key = (frm << 18) | (to << 12)
             if do_reduce:
-                r = lmr_row[idx if idx < 128 else 127]
+                r = lmr_row[idx if idx < 128 else 127] + lmr_adjust
+                if r < 1:
+                    r = 1
                 reduce_sc = -self.search(board, depth - 1 - r, -alpha - 1, -alpha,
-                                         ply + 1, True, ext_left)
+                                         ply + 1, True, ext_left, child_key)
                 if reduce_sc > alpha:
                     # PVS re-search penuh (do_reduce hanya utk langkah non-pertama)
                     sc = -self.search(board, depth - 1 + ext, -alpha - 1, -alpha,
-                                      ply + 1, True, ext_left - ext)
+                                      ply + 1, True, ext_left - ext, child_key)
                     if alpha < sc < beta:
                         sc = -self.search(board, depth - 1 + ext, -beta, -alpha,
-                                          ply + 1, True, ext_left - ext)
+                                          ply + 1, True, ext_left - ext, child_key)
                 else:
                     sc = reduce_sc
             elif first:
                 # PVS: full window utk move pertama
                 sc = -self.search(board, depth - 1 + ext, -beta, -alpha, ply + 1,
-                                  True, ext_left - ext)
+                                  True, ext_left - ext, child_key)
             else:
                 # PVS: null window utk sisanya, re-search saat fail high
                 sc = -self.search(board, depth - 1 + ext, -alpha - 1, -alpha,
-                                  ply + 1, True, ext_left - ext)
+                                  ply + 1, True, ext_left - ext, child_key)
                 if alpha < sc < beta:
                     sc = -self.search(board, depth - 1 + ext, -beta, -alpha,
-                                      ply + 1, True, ext_left - ext)
+                                      ply + 1, True, ext_left - ext, child_key)
             pop(board)
             if self.stop:
                 return self._stm(board)
@@ -854,14 +975,39 @@ class Searcher:
             if is_quiet:
                 quiet_count += 1
             if alpha >= beta:
+                bonus = depth * depth
                 if is_quiet:
                     kl = self.killers[ply & 127]
                     kl[1] = kl[0]
                     kl[0] = mv
-                    hkey = (board.turn, mv.from_square, mv.to_square)
-                    # Keep history bounded in very long self-play runs.
-                    self.history[hkey] = min(1_000_000,
-                                             self.history.get(hkey, 0) + depth * depth)
+                    # Butterfly + continuation history, bounded (self-play
+                    # panjang), dengan penalti utk quiet yang gagal cutoff.
+                    v = history.get(hk, 0) + bonus
+                    history[hk] = 1_000_000 if v > 1_000_000 else v
+                    if prev_key:
+                        ck = prev_key | (frm << 6) | to
+                        v = cont_history.get(ck, 0) + bonus
+                        cont_history[ck] = 600_000 if v > 600_000 else v
+                    for bk in tried_quiets:
+                        if bk == hk:
+                            continue
+                        v = history.get(bk, 0) - bonus
+                        history[bk] = v if v > -1_000_000 else -1_000_000
+                        if prev_key:
+                            # Rekonstruksi kunci continuation dari kunci
+                            # butterfly: frm = (bk>>6)&63, to = bk&63.
+                            ck2 = prev_key | (((bk >> 6) & 63) << 6) | (bk & 63)
+                            v = cont_history.get(ck2, 0) - bonus
+                            cont_history[ck2] = v if v > -600_000 else -600_000
+                else:
+                    ckk = (victim << 12) | (frm << 6) | to
+                    v = cap_history.get(ckk, 0) + bonus
+                    cap_history[ckk] = 1_000_000 if v > 1_000_000 else v
+                    for tc in tried_caps:
+                        if tc == ckk:
+                            continue
+                        v = cap_history.get(tc, 0) - bonus
+                        cap_history[tc] = v if v > -1_000_000 else -1_000_000
                 bound = LOWER
                 self.cutoffs += 1
                 break
@@ -896,12 +1042,16 @@ class Searcher:
                 completed = False
                 break
             self._push(board, mv)
+            child_key = (mv.from_square << 18) | (mv.to_square << 12)
             if first:
-                score = -self.search(board, depth - 1, -beta, -alpha, 1)
+                score = -self.search(board, depth - 1, -beta, -alpha, 1,
+                                     True, 24, child_key)
             else:
-                score = -self.search(board, depth - 1, -alpha - 1, -alpha, 1)
+                score = -self.search(board, depth - 1, -alpha - 1, -alpha, 1,
+                                     True, 24, child_key)
                 if alpha < score < beta and not self._budget_exceeded():
-                    score = -self.search(board, depth - 1, -beta, -alpha, 1)
+                    score = -self.search(board, depth - 1, -beta, -alpha, 1,
+                                         True, 24, child_key)
             self._pop(board)
             if self.stop or self._budget_exceeded(force_clock=True):
                 completed = False
@@ -915,6 +1065,27 @@ class Searcher:
                 break
             first = False
         return best_move, best_score, completed, move_scores
+
+    # ---------------- ekstensi waktu posisi sulit (1.8) ----------------
+    def _can_extend(self) -> bool:
+        """Ekstensi hanya untuk budget waktu (budget node tak pernah dilonggar)."""
+        return (self.node_limit == 0
+                and self._ext_count < self.hard_ext_max
+                and self.hard_ext_ms > 0
+                and self.time_ms >= self.hard_ext_min_budget_ms)
+
+    def _extend_budget(self, reason: str) -> None:
+        """Perpanjang deadline sekali sesuai ``hard_ext_ms`` dan reset stop."""
+        self._ext_count += 1
+        self._ext_reasons.append(reason)
+        self._ext_ms_total += self.hard_ext_ms
+        ext_s = self.hard_ext_ms / 1000.0
+        self.deadline += ext_s
+        self._hard_deadline += ext_s
+        if self._time_expired and time.monotonic() < self.deadline:
+            self._time_expired = False
+            self.stop = False
+            self.stop_reason = None
 
     # ---------------- iterative deepening ----------------
     def best_move(self, board: chess.Board):
@@ -930,6 +1101,10 @@ class Searcher:
         self.tt_hits = self.tt_misses = self.cutoffs = self.qnodes = 0
         self.stop = False
         self.age += 1
+        # 1.8: reset state ekstensi waktu posisi sulit.
+        self._ext_count = 0
+        self._ext_ms_total = 0
+        self._ext_reasons = []
         # Fresh, bounded evaluation cache per search: within one search,
         # transpositions and qsearch leaves repeat massively.
         self._eval_cache = {}
@@ -946,6 +1121,9 @@ class Searcher:
         best_score = self._stm(board)
         depth_reached = 0
         prev_scores: dict = {}
+        # 1.8: pelacak stabilitas root antar iterasi (trigger ekstensi).
+        last_best_uci = None
+        last_score = None
         for d in range(1, self.max_depth + 1):
             # 1.6 min-depth guarantee: selama depth yang sudah selesai masih di
             # bawah min_depth, iterasi berikutnya memakai anggaran grace. Begitu
@@ -981,15 +1159,36 @@ class Searcher:
                 # fail low/high: widen and retry this depth
             if iter_best is None or not completed:
                 # Iterasi terpotong oleh waktu: ulangi depth yang sama selama
-                # jaminan min_depth belum terpenuhi dan grace masih tersisa.
-                if (self.stop_reason == "time_limit"
-                        and depth_reached < self.min_depth
-                        and time.monotonic() < self._grace_deadline):
-                    continue
+                # jaminan min_depth belum terpenuhi dan grace masih tersisa;
+                # bila grace habis dan posisi masih terlalu sulit (depth
+                # jaminan tidak tercapai), pakai ekstensi waktu posisi sulit
+                # (1.8) — paling banyak hard_ext_max kali per langkah.
+                if self.stop_reason == "time_limit":
+                    if (depth_reached < self.min_depth
+                            and time.monotonic() < self._grace_deadline):
+                        continue
+                    if depth_reached < self.min_depth and self._can_extend():
+                        self._extend_budget("hard_position_timeout")
+                        continue
                 break
             best, best_score, depth_reached = iter_best, iter_score, d
             # remember this iteration's root move scores for next-depth ordering
             prev_scores = move_scores
+            # 1.8: trigger ekstensi via stabilitas root — best move berubah
+            # antar iterasi atau skor berayun besar menandakan posisi sulit;
+            # bila sisa budget tinggal < 40%, perpanjang sebelum iterasi
+            # berikutnya agar keputusan tidak diambil pada pencarian dangkal.
+            unstable = (d >= 4 and last_best_uci is not None
+                        and iter_best.uci() != last_best_uci)
+            swing = (d >= 4 and last_score is not None
+                     and abs(iter_score - last_score) >= 150)
+            last_best_uci = iter_best.uci()
+            last_score = iter_score
+            if (unstable or swing) and self._can_extend():
+                remaining_ms = (self.deadline - time.monotonic()) * 1000.0
+                if remaining_ms < 0.4 * self.time_ms:
+                    self._extend_budget("root_instability" if unstable
+                                        else "score_swing")
             if self._budget_exceeded(force_clock=True):
                 break
             if self.on_info is not None:
@@ -1014,4 +1213,7 @@ class Searcher:
                       "stop_reason": self.stop_reason,
                       "completed_depth": depth_reached,
                       "min_depth_met": (depth_reached >= self.min_depth
-                                        if self.min_depth else None)}
+                                        if self.min_depth else None),
+                      "time_extended_ms": self._ext_ms_total,
+                      "extensions": self._ext_count,
+                      "extension_reasons": list(self._ext_reasons)}

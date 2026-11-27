@@ -56,6 +56,13 @@ class SearchConfig:
     use_lmr: bool = True
     use_lmp: bool = True
     check_extension: bool = True
+    # 1.8: ekstensi waktu posisi sulit — bila budget waktu habis saat depth
+    # jaminan belum tercapai, ATAU best move root tidak stabil/skor berayun
+    # antar iterasi, budget diperpanjang hard_ext_ms maksimal hard_ext_max
+    # kali per langkah. Tidak berlaku untuk budget node.
+    hard_ext_ms: int = 5000
+    hard_ext_max: int = 1
+    hard_ext_min_budget_ms: int = 500  # budget terlalu kecil tidak diekstensi
 
 
 @dataclass
@@ -67,6 +74,12 @@ class LearningConfig:
     validation_fraction: float = 0.20
     seed: int = 42
     max_samples_per_game: int = 120
+    # 1.8: pembelajaran lebih efektif — warm start dari bobot champion,
+    # decay learning rate per epoch, dan pembobotan kelas hasil (1-0/draw/0-1)
+    # sebanding frekuensi terbalik agar korpus timpang tidak membiaskan model.
+    warm_start: bool = True
+    lr_decay: float = 0.85          # lr_epoch = lr * lr_decay^epoch (1.0 = mati)
+    class_balance: bool = True
 
 
 @dataclass
@@ -192,6 +205,9 @@ class LichessConfig:
     learn_every_games: int = 5     # 0 = nonaktif
     learn_min_games: int = 8
     learn_max_games: int = 200
+    # 1.8: ekstensi waktu posisi sulit saat bermain di Lichess.
+    hard_ext_ms: int = 5000
+    hard_ext_max: int = 1
 
 
 @dataclass
@@ -327,6 +343,12 @@ def validate_config(cfg: AppConfig) -> list[str]:
         (0.0 <= cfg.cross.skill_down_score < cfg.cross.skill_up_score <= 1.0,
          "cross.skill_down_score < skill_up_score <= 1"),
         (cfg.cross.skill_window >= 1, "cross.skill_window >= 1"),
+        (cfg.search.hard_ext_ms >= 0 and cfg.search.hard_ext_max >= 0
+         and cfg.search.hard_ext_min_budget_ms >= 0,
+         "search.hard_ext_* harus non-negatif"),
+        (cfg.lichess.hard_ext_ms >= 0 and cfg.lichess.hard_ext_max >= 0,
+         "lichess.hard_ext_* harus non-negatif"),
+        (0.0 < cfg.learning.lr_decay <= 1.0, "learning.lr_decay dalam (0,1]"),
     ]
     for ok, msg in checks:
         if not ok:

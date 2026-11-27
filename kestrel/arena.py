@@ -129,7 +129,7 @@ class Player:
     def __init__(self, name, net=None, time_ms=300, node_limit=0, max_depth=64,
                  memory: AdaptiveMemory | None = None, use_null_move=True,
                  use_lmr=True, seed=42, learned=None, min_depth=0, grace_ms=1000,
-                 tt_size=None, book=None):
+                 tt_size=None, book=None, hard_ext_ms=0, hard_ext_max=0):
         self.name = name
         self.net = net
         self.time_ms = time_ms
@@ -143,11 +143,15 @@ class Player:
         self.book = book  # KnowledgeBase opsional (langkah pembuka statistik)
         self.book_moves_used = 0
         # Persistent per-player search state: TT, killers and history survive across moves.
+        # 1.8: ekstensi waktu posisi sulit — default OFF (0) agar semua
+        # pipeline game (selfplay/verifikasi/cross) tetap deterministik;
+        # pemainan nyata (bot Lichess) mengaktifkannya lewat config.
         searcher_kwargs: dict[str, Any] = {
             "node_limit": self.node_limit, "time_ms": self.time_ms,
             "max_depth": self.max_depth, "use_null_move": self.use_null_move,
             "use_lmr": self.use_lmr, "learned": self.learned,
             "min_depth": min_depth, "grace_ms": grace_ms,
+            "hard_ext_ms": int(hard_ext_ms), "hard_ext_max": int(hard_ext_max),
         }
         if tt_size is not None:
             searcher_kwargs["tt_size"] = int(tt_size)

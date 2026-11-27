@@ -32,7 +32,8 @@ def run_game_worker(game_id: int, seed: int, time_ms: int, max_depth: int,
                    grace_ms: int = 600, temperature: float = 0.25,
                    book_max_plies: int | None = None,
                    book_min_games: int | None = None,
-                   book_max_moves: int | None = None):
+                   book_max_moves: int | None = None,
+                   hard_ext_ms: int = 0, hard_ext_max: int = 0):
     def emit(kind, **payload):
         event_queue.put({"type": kind, "game_id": game_id, "batch_id": batch_id,
                          "timestamp": time.time(), "worker_pid": os.getpid(), **payload})
@@ -82,6 +83,9 @@ def run_game_worker(game_id: int, seed: int, time_ms: int, max_depth: int,
     worker_kwargs: dict[str, Any] = {
         "time_ms": time_ms, "max_depth": max_depth, "learned": learned,
         "min_depth": min_depth, "grace_ms": grace_ms, "book": book,
+        # 1.8: default 0/0 — selfplay korpus tetap deterministik; pemainan
+        # nyata mengaktifkan ekstensi waktu lewat config.
+        "hard_ext_ms": int(hard_ext_ms), "hard_ext_max": int(hard_ext_max),
     }
     white = Player("Kestrel", net=net, **worker_kwargs)
     black = Player("Kestrel", net=net, **worker_kwargs)

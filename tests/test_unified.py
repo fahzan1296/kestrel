@@ -162,7 +162,15 @@ def test_trainer_one_generation(tmp_path):
     assert gen["selfplay_ok"]
     assert "knowledge" in gen["stages"]
     results = cfg.results_path
-    assert (results / "learned_eval.json").exists()
+    # 1.8: kandidat selalu disimpan, tapi champion model hanya ditulis bila
+    # verifikasi PROMOTE. Kandidat REJECT adalah hasil valid, bukan kegagalan.
+    candidate_path = Path(gen["candidate"])
+    assert candidate_path.exists(), "checkpoint kandidat harus dibuat"
+    if gen.get("promoted"):
+        assert (results / "learned_eval.json").exists()
+    else:
+        assert gen["stages"]["verification"]["decision"] == "REJECT"
+        assert not (results / "learned_eval.json").exists()
     assert (results / "champion.json").exists()
     assert (results / "training_log.jsonl").exists()
     ver_files = list(results.glob("verification_gen_*.json"))

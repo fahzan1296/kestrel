@@ -17,6 +17,14 @@ use_null_move = true
 use_lmr = true
 use_lmp = true
 check_extension = true
+# 1.8: ekstensi waktu posisi sulit — bila budget habis saat depth jaminan
+# belum tercapai, ATAU best move root tidak stabil/skor berayun antar
+# iterasi, budget diperpanjang hard_ext_ms (maks hard_ext_max kali per
+# langkah). Budget node tidak pernah dilonggar; budget < ambang minimum
+# tidak diekstensi.
+hard_ext_ms = 5000
+hard_ext_max = 1
+hard_ext_min_budget_ms = 500
 
 [selfplay]
 # Sumber utama budget trainer unified (generasi memakai nilai ini).
@@ -40,6 +48,10 @@ patience = 4
 validation_fraction = 0.20
 seed = 42
 max_samples_per_game = 120
+# 1.8: pembelajaran lebih efektif & efisien
+warm_start = true    # lanjutkan dari bobot champion, bukan dari nol
+lr_decay = 0.85      # learning rate menurun 15% per epoch (konvergensi halus)
+class_balance = true # bobot kelas hasil sebanding frekuensi terbalik
 
 [reda]
 enabled = true
@@ -138,6 +150,9 @@ move_time_ms = 1000
 max_depth = 18
 min_depth = 10            # jaminan depth tinggi saat bermain online
 grace_ms = 1500
+# 1.8: posisi sulit saat bermain mendapat waktu ekstra (+5 detik, 1x/langkah)
+hard_ext_ms = 5000
+hard_ext_max = 1
 book_moves = true
 resign_cp = -900          # resign setelah N langkah berturut <= ambang
 resign_moves = 3

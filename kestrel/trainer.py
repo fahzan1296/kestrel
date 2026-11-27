@@ -240,18 +240,29 @@ def run_training(cfg: AppConfig | None = None, *, generations: int | None = None
         learning_report = None
         candidate = champion
         try:
+            # 1.8: warm start dari bobot champion (skema v2 + migrasi menjamin
+            # dimensi cocok) + lr decay + class balance dari config.
+            init_w = init_b = None
+            if cfg.learning.warm_start and champion is not None:
+                init_w, init_b = champion.weights, champion.bias
             trained, learning_report = train_pgn(
                 [pgn_path], epochs=cfg.learning.epochs, lr=cfg.learning.lr,
                 seed=cfg.learning.seed, batch_size=cfg.learning.batch_size,
                 patience=cfg.learning.patience,
                 validation_fraction=cfg.learning.validation_fraction,
-                max_samples_per_game=cfg.learning.max_samples_per_game)
+                max_samples_per_game=cfg.learning.max_samples_per_game,
+                init_weights=init_w, init_bias=init_b if init_b is not None else 0.0,
+                lr_decay=cfg.learning.lr_decay,
+                class_balance=cfg.learning.class_balance)
             candidate = _champion_candidate_merge(champion, trained)
             gen_summary["stages"]["learning"] = {
                 "samples": learning_report["samples"], "games_read": learning_report["games_read"],
                 "best_epoch": learning_report["best_epoch"],
                 "validation_logloss": learning_report["best_validation_logloss"],
-                "validation_mode": learning_report["validation_mode"]}
+                "validation_mode": learning_report["validation_mode"],
+                "warm_start": learning_report.get("warm_start"),
+                "lr_decay": learning_report.get("lr_decay"),
+                "class_balance": learning_report.get("class_balance")}
             emit("learning selesai", samples=learning_report["samples"],
                  best_epoch=learning_report["best_epoch"])
         except Exception as exc:

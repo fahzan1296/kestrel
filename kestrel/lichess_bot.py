@@ -547,7 +547,10 @@ class LichessBot:
                 book = None
         return Player("Kestrel-Lichess", time_ms=self.lic.move_time_ms,
                       max_depth=self.lic.max_depth, learned=learned, book=book,
-                      min_depth=self.lic.min_depth, grace_ms=self.lic.grace_ms)
+                      min_depth=self.lic.min_depth, grace_ms=self.lic.grace_ms,
+                      # 1.8: ekstensi waktu posisi sulit aktif saat bermain.
+                      hard_ext_ms=self.lic.hard_ext_ms,
+                      hard_ext_max=self.lic.hard_ext_max)
 
     # ---------------- move decision (testable tanpa jaringan) ----------------
     def choose_move(self, board: chess.Board, rng=None, player=None):

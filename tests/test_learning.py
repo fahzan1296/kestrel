@@ -8,7 +8,7 @@ from kestrel.reda import RareExperienceAdapter
 
 def test_outcome_learning():
     b=chess.Board()
-    assert features(b).shape == (11,)
+    assert features(b).shape == (14,)
     assert all(float(x)==float(x) for x in features(b))
     model=OutcomeModel()
     assert abs(model.score(b)) < 1e-9
@@ -28,7 +28,7 @@ def test_outcome_learning():
         p=os.path.join(d,"tiny.pgn")
         open(p,"w").write('[Event "Tiny"]\n[Result "1-0"]\n\n1. e4 e5 2. Qh5 Nc6 3. Bc4 Nf6 4. Qxf7# 1-0\n')
         trained, meta=train_pgn([p],epochs=2,seed=7)
-        assert meta["samples"] > 0 and trained.weights.shape == (11,)
+        assert meta["samples"] > 0 and trained.weights.shape == (14,)
     # REDA micro-adaptation: frozen base weights, sparse bounded residual, validation gate.
     base_model = OutcomeModel()
     base_weights = base_model.weights.copy()

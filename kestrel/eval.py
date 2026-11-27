@@ -1,4 +1,4 @@
-"""KESTREL — Tiny Evaluator (1.7: fused single-pass handcrafted term).
+"""KESTREL — Tiny Evaluator (1.8: fusi satu-pass penuh handcrafted term).
 
 E(s) = E_material + E_PST + E_mobility + E_pawn + E_king + E_tempo
      + alpha*H(s) blended dengan N_theta(s) (MLP numpy, 768->128->64->1).
@@ -15,13 +15,21 @@ untuk setiap bidak. Semantik dan nilai keluaran identik dengan 1.5
 - ``mobility`` mengakses tabel attack diag/rank/file python-chess langsung
   per jenis bidak (tipe bidak sudah diketahui dari loop) — tanpa dispatch
   ``board.attacks_mask`` per bidak.
-- ``material`` + ``pst`` dilebur jadi satu pass per jenis bidak (12 loop
-  alih-alih 17), dan ``pawn_structure`` + ``piece_bonuses`` berbagi satu
-  perhitungan file-pion (``_pawn_and_bonuses``).
-- Blok terminal (mate/stalemate/draw) di ``handcrafted`` menerima hint dari
-  caller search (``in_check``/``has_moves``/``terminal``) supaya daun qsearch
-  tidak membayar movegen penuh hanya untuk mengonfirmasi "bukan stalemate";
-  gate ketat berbasis halfmove_clock/popcount menjaga hasil identik.
+- ``material`` + ``pst`` dilebur jadi satu pass per jenis bidak, dan
+  ``pawn_structure`` + ``piece_bonuses`` berbagi satu perhitungan file-pion.
+- Blok terminal menerima hint dari caller search (``in_check``/``has_moves``
+  /``terminal``) supaya daun qsearch tidak membayar movegen penuh.
+
+1.8 upgrade (performa murni, nilai keluaran TETAP identik bit-per-bit):
+- ``handcrafted`` memindai board HANYA SEKALI per (jenis bidak, warna):
+  material, PST taper, mobility berbobot, istilah pion
+  (doubled/isolated/passed), bishop pair, rook file terbuka/semi-terbuka,
+  dan king safety semuanya diakumulasi dalam satu loop — sebelumnya board
+  dipindai ~4 kali. Semua term tetap integer dan penjumlahan komutatif,
+  sehingga hasilnya identik dengan komposisi lama (diverifikasi pada
+  posisi acak + antisimetri mirror). Fungsi publik per-term (``pst``,
+  ``mobility``, ``pawn_structure``, ``king_safety``, ``piece_bonuses``)
+  dipertahankan sebagai referensi dan untuk pemakaian di luar jalur panas.
 """
 from __future__ import annotations
 import math
@@ -407,17 +415,22 @@ def _pawn_and_bonuses(board: chess.Board) -> int:
 
 def handcrafted(board: chess.Board, *, in_check: bool | None = None,
                 has_moves: bool | None = None, terminal: bool = True) -> int:
-    """H(s), White-relative (centipawn).
+    """H(s), White-relative (centipawn) — fusi SATU pass per (pt, warna).
 
     Hint opsional dari caller yang SUDAH menghitung informasi tersebut
     (jalur search), supaya predikat mahal tidak dibayar dua kali. Tanpa
-    hint, perilaku dan nilai identik dengan 1.5/1.6:
+    hint, perilaku dan nilai identik dengan 1.5/1.6/1.7:
     - ``in_check``: hasil ``board.is_check()`` bila sudah diketahui.
-    - ``has_moves``: True bila caller sudah memastikan ada langkah legal
-      (stalemate/mate mustahil), False bila dipastikan tidak ada, None =
-      belum diketahui (pemeriksaan lengkap dijalankan).
+    - ``has_moves``: True bila caller sudah memastikan ada langkah legal,
+      False bila dipastikan tidak ada, None = belum diketahui.
     - ``terminal``: False bila caller sudah menangani draw/terminal di
       pintu masuk node (repetisi, 50-langkah, material tak cukup).
+
+    1.8: material+PST+mobility+pion+bonrus+raja diakumulasi dalam satu
+    loop bitboard per jenis bidak. Semua term integer & komutatif — nilai
+    identik bit-per-bit dengan komposisi ``material + pst + mobility*2 +
+    pawn_structure + piece_bonuses + king_safety + tempo`` versi 1.7
+    (diverifikasi pada ratusan posisi acak + mirror).
     """
     if terminal or has_moves is None:
         if in_check is None:
@@ -442,34 +455,170 @@ def handcrafted(board: chess.Board, *, in_check: bool | None = None,
         if clock >= 8 and board.is_fivefold_repetition():
             return 0
     tempo = 10 if board.turn == chess.WHITE else -10
-    # Fusi material+PST: satu pass per jenis bidak (1.7), truncation int()
-    # per bidak tetap eksak seperti 1.5/1.6. Fase dihitung dari popcount
-    # (integer) sehingga tabel taper pra-hitung bisa dipakai (1.7.1).
+    # Fase integer (popcount) untuk tabel taper pra-hitung — sama dengan 1.7.
     p = (board.knights.bit_count() + board.bishops.bit_count()
          + 2 * board.rooks.bit_count() + 4 * board.queens.bit_count())
     if p > 24:
         p = 24
-    mat = 0
-    pst_e = 0
-    for pt, val, _mg, _eg in _PST_TUPLES:
-        table = _tapered_table(pt, p)
-        m = board.pieces_mask(pt, chess.WHITE)
-        while m:
-            sq = (m & -m).bit_length() - 1
-            m &= m - 1
-            if val:
-                mat += val
-            pst_e += table[sq]
-        m = board.pieces_mask(pt, chess.BLACK)
-        while m:
-            sq = (m & -m).bit_length() - 1
-            m &= m - 1
-            msq = sq ^ 56
-            if val:
-                mat -= val
-            pst_e -= table[msq]
-    return (mat + pst_e + mobility(board) * 2 + _pawn_and_bonuses(board)
-            + king_safety(board) + tempo)
+    white_occ = board.occupied_co[chess.WHITE]
+    black_occ = board.occupied_co[chess.BLACK]
+    white_pawns = board.pawns & white_occ
+    black_pawns = board.pawns & black_occ
+    # Agregat file-pion (untuk doubled/isolated/passer + rook open/semi):
+    # 16 popcount mask, tanpa iterasi per pion.
+    w_pf = [(white_pawns & _FILES[f]).bit_count() for f in range(8)]
+    b_pf = [(black_pawns & _FILES[f]).bit_count() for f in range(8)]
+    w_files = 0
+    for f in range(8):
+        if w_pf[f]:
+            w_files |= 1 << f
+    b_files = 0
+    for f in range(8):
+        if b_pf[f]:
+            b_files |= 1 << f
+    tables = tuple(_tapered_table(pt, p) for pt, _, _, _ in _PST_TUPLES)
+    mat = pst_e = mob_e = pawn_e = bonus_e = king_e = 0
+    # ---- PION: material, PST, mobility, passer (doubled/isolated per file) ----
+    tw = tables[0]
+    att_w = _BB_PAWN_ATT[chess.WHITE]
+    att_b = _BB_PAWN_ATT[chess.BLACK]
+    m = white_pawns
+    while m:
+        sq = (m & -m).bit_length() - 1
+        m &= m - 1
+        mat += 100
+        pst_e += tw[sq]
+        mob_e += 2 * att_w[sq].bit_count()
+        if not (black_pawns & _PASS_ZONE_W[sq]):
+            pawn_e += _PASSER_BONUS[sq >> 3]
+    m = black_pawns
+    while m:
+        sq = (m & -m).bit_length() - 1
+        m &= m - 1
+        mat -= 100
+        pst_e -= tw[sq ^ 56]
+        mob_e -= 2 * att_b[sq].bit_count()
+        if not (white_pawns & _PASS_ZONE_B[sq]):
+            pawn_e -= _PASSER_BONUS[7 - (sq >> 3)]
+    for f in range(8):
+        c = w_pf[f]
+        if c:
+            pawn_e -= 12 * (c - 1)
+            if (f == 0 or not w_pf[f - 1]) and (f == 7 or not w_pf[f + 1]):
+                pawn_e -= 14 * c
+        c = b_pf[f]
+        if c:
+            pawn_e += 12 * (c - 1)
+            if (f == 0 or not b_pf[f - 1]) and (f == 7 or not b_pf[f + 1]):
+                pawn_e += 14 * c
+    # ---- KNIGHT ----
+    tk = tables[1]
+    m = board.knights & white_occ
+    while m:
+        sq = (m & -m).bit_length() - 1
+        m &= m - 1
+        mat += 320
+        pst_e += tk[sq]
+        mob_e += 4 * _BB_KNIGHT_ATT[sq].bit_count()
+    m = board.knights & black_occ
+    while m:
+        sq = (m & -m).bit_length() - 1
+        m &= m - 1
+        mat -= 320
+        pst_e -= tk[sq ^ 56]
+        mob_e -= 4 * _BB_KNIGHT_ATT[sq].bit_count()
+    # ---- BISHOP (+ bishop pair) ----
+    tb = tables[2]
+    white_bishops = board.bishops & white_occ
+    black_bishops = board.bishops & black_occ
+    m = white_bishops
+    while m:
+        sq = (m & -m).bit_length() - 1
+        m &= m - 1
+        mat += 335
+        pst_e += tb[sq]
+        mob_e += 4 * _BB_DIAG[sq][_BB_DIAG_M[sq] & board.occupied].bit_count()
+    m = black_bishops
+    while m:
+        sq = (m & -m).bit_length() - 1
+        m &= m - 1
+        mat -= 335
+        pst_e -= tb[sq ^ 56]
+        mob_e -= 4 * _BB_DIAG[sq][_BB_DIAG_M[sq] & board.occupied].bit_count()
+    if white_bishops.bit_count() >= 2:
+        bonus_e += 30
+    if black_bishops.bit_count() >= 2:
+        bonus_e -= 30
+    # ---- ROOK (+ file terbuka/semi-terbuka) ----
+    tr = tables[3]
+    occupied = board.occupied
+    m = board.rooks & white_occ
+    while m:
+        sq = (m & -m).bit_length() - 1
+        m &= m - 1
+        mat += 500
+        pst_e += tr[sq]
+        mob_e += 2 * (_BB_RANK[sq][_BB_RANK_M[sq] & occupied].bit_count()
+                      + _BB_FILE[sq][_BB_FILE_M[sq] & occupied].bit_count())
+        fbit = 1 << (sq & 7)
+        if not (w_files & fbit):
+            bonus_e += 16 if not (b_files & fbit) else 8
+    m = board.rooks & black_occ
+    while m:
+        sq = (m & -m).bit_length() - 1
+        m &= m - 1
+        mat -= 500
+        pst_e -= tr[sq ^ 56]
+        mob_e -= 2 * (_BB_RANK[sq][_BB_RANK_M[sq] & occupied].bit_count()
+                      + _BB_FILE[sq][_BB_FILE_M[sq] & occupied].bit_count())
+        fbit = 1 << (sq & 7)
+        if not (b_files & fbit):
+            bonus_e -= 16 if not (w_files & fbit) else 8
+    # ---- QUEEN ----
+    tq = tables[4]
+    m = board.queens & white_occ
+    while m:
+        sq = (m & -m).bit_length() - 1
+        m &= m - 1
+        mat += 900
+        pst_e += tq[sq]
+        mob_e += (_BB_DIAG[sq][_BB_DIAG_M[sq] & occupied].bit_count()
+                  + _BB_RANK[sq][_BB_RANK_M[sq] & occupied].bit_count()
+                  + _BB_FILE[sq][_BB_FILE_M[sq] & occupied].bit_count())
+    m = board.queens & black_occ
+    while m:
+        sq = (m & -m).bit_length() - 1
+        m &= m - 1
+        mat -= 900
+        pst_e -= tq[sq ^ 56]
+        mob_e -= (_BB_DIAG[sq][_BB_DIAG_M[sq] & occupied].bit_count()
+                  + _BB_RANK[sq][_BB_RANK_M[sq] & occupied].bit_count()
+                  + _BB_FILE[sq][_BB_FILE_M[sq] & occupied].bit_count())
+    # ---- KING (PST + shield + danger) ----
+    tkg = tables[5]
+    for color, sign in ((chess.WHITE, 1), (chess.BLACK, -1)):
+        ksq = board.king(color)
+        if ksq is None:
+            continue
+        if color == chess.WHITE:
+            pst_e += tkg[ksq]
+            own_pawns = white_pawns
+        else:
+            pst_e -= tkg[ksq ^ 56]
+            own_pawns = black_pawns
+        kf = ksq & 7
+        shield = 0
+        for f in (kf - 1, kf, kf + 1):
+            if 0 <= f <= 7:
+                sq = chess.square(f, 1 if color == chess.WHITE else 6)
+                if (own_pawns >> sq) & 1:
+                    shield += 1
+        king_e += 8 * shield * sign
+        king_e -= 6 * board.attackers_mask(not color, ksq).bit_count() * sign
+    # Penjumlahan integer komutatif: hasil identik dengan komposisi 1.7.
+    # Catatan faktor: komposisi lama = mobility(board) * 2 — bobot per bidak
+    # dikali 2 global (pion efektif 4, ks 8, mb 8, br 4, qn 2).
+    return mat + pst_e + 2 * mob_e + pawn_e + bonus_e + king_e + tempo
 
 
 # ---------------- Neural evaluator (numpy MLP) -------------------------------

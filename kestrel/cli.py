@@ -373,9 +373,9 @@ def cmd_lichess(args) -> int:
         cfg = cfg.with_overrides("lichess", concurrency=args.concurrency)
     token = cfg.lichess.token or os.environ.get("KESTREL_LICHESS_TOKEN", "")
     if not token and not args.dry_run:
-        print("Token Lichess belum ada. Set [lichess] token di config.toml "
-              "atau --token. Buat token di https://lichess.org/account/oauth/token "
-              "dengan scope bot play.")
+        print("Token Lichess belum ada. Set [lichess] token di config.toml, "
+              "--token, atau env KESTREL_LICHESS_TOKEN. Buat token di "
+              "https://lichess.org/account/oauth/token dengan scope bot play.")
         return 2
     bot = LichessBot(cfg, token=token, dry_run=args.dry_run)
     try:
