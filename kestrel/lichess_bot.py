@@ -310,7 +310,7 @@ class LichessBot:
         limit = int(self.lic.learn_max_games)
         if limit > 0:
             fresh = fresh[-limit:]
-        corpus = self._write_learning_corpus(
+        self._write_learning_corpus(
             fresh, self.pgn_dir / ".learn_corpus.pgn")
         try:
             from .knowledge import KnowledgeBase
@@ -602,6 +602,14 @@ class LichessBot:
         return challenger.get("name") != self.username
 
     # ---------------- game loop ----------------
+    def _stream_game(self, game_id: str):
+        """Stream game dengan timeout diperlakukan sebagai akhir stream."""
+        try:
+            yield from self.api.stream(f"/api/bot/game/stream/{game_id}")
+        except TimeoutError:
+            print(f"[lichess] {game_id}: stream timeout; simpan state terakhir",
+                  flush=True)
+
     def play_game(self, game_id: str, player=None) -> dict:
         """Jalankan satu game; tutup koneksi book milik player di akhir."""
         active = player if player is not None else self._make_player()
@@ -623,7 +631,7 @@ class LichessBot:
         last_state: dict = {}
         resign_streak_state = {"n": 0}
         rng = random.Random(int(time.time()) & 0xFFFF)
-        for ev in self.api.stream(f"/api/bot/game/stream/{game_id}"):
+        for ev in self._stream_game(game_id):
             ev_type = ev.get("type")
             if ev_type == "gameFull":
                 game_full = ev
@@ -688,9 +696,11 @@ class LichessBot:
         if mv is None:
             return None
         score = self._eval_for_me(board, info)
+        side = "white" if my_color else "black"
         if board.can_claim_draw() and score < self.lic.offer_draw_cp:
-            self._post(f"/api/bot/game/{game_id}/move/{mv.uci()}",
-                       params="claimDraw=true")
+            err = self._post_move(game_id, mv.uci(), claim=True)
+            if err is not None:
+                return {"game_id": game_id, "status": err, "my_color": side}
             print(f"[lichess] {game_id}: {mv.uci()} + claim draw", flush=True)
             return None
         if score <= self.lic.resign_cp:
@@ -702,10 +712,32 @@ class LichessBot:
             opponent = "black" if my_color else "white"
             return {"game_id": game_id, "status": "resign_sent", "winner": opponent}
         # Budget waktu sederhana: hormati remaining time.
-        self._post(f"/api/bot/game/{game_id}/move/{mv.uci()}")
+        err = self._post_move(game_id, mv.uci())
+        if err is not None:
+            return {"game_id": game_id, "status": err, "my_color": side}
         print(f"[lichess] {game_id}: memainkan {mv.uci()} "
               f"(d{info.get('depth')}, {info.get('nodes')}n)", flush=True)
         return None
+
+    def _post_move(self, game_id: str, uci: str, *, claim: bool = False) -> str | None:
+        """Kirim langkah. Kembalikan status kegagalan yang bisa ditolerir."""
+        path = f"/api/bot/game/{game_id}/move/{uci}"
+        try:
+            self._post(path, params="claimDraw=true" if claim else "")
+            return None
+        except urllib.error.HTTPError as exc:
+            if claim and exc.code == 400:
+                print(f"[lichess] {game_id}: claim draw ditolak 400, "
+                      "kirim langkah biasa", flush=True)
+                return self._post_move(game_id, uci)
+            if exc.code == 400:
+                print(f"[lichess] {game_id}: langkah {uci} ditolak 400 "
+                      "(game mungkin sudah usai)", flush=True)
+                return "move_rejected_400"
+            raise
+        except TimeoutError:
+            print(f"[lichess] {game_id}: POST langkah {uci} timeout", flush=True)
+            return "move_timeout"
 
     def _save_pgn(self, game_full: dict | None, state: dict, summary: dict):
         try:

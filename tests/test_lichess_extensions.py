@@ -487,3 +487,99 @@ def test_submit_game_builds_player_inside_worker_thread(tmp_path, monkeypatch):
     executor.shutdown(wait=True)
     assert maker_threads and main_thread not in maker_threads
     assert any("/move/" in path for path in posted)
+
+
+def test_claim_draw_400_falls_back_to_plain_move():
+    """HTTP 400 saat claimDraw harus diretry sebagai langkah biasa."""
+    import chess
+
+    from kestrel.config import AppConfig
+    from kestrel.lichess_bot import LichessBot
+
+    bot = LichessBot(AppConfig(), token=TEST_TOKEN, dry_run=True)
+    board = chess.Board()
+    board.can_claim_draw = lambda: True  # type: ignore[method-assign]
+
+    def fake_choose_move(board, rng=None, player=None):
+        return chess.Move.from_uci("e2e4"), {"score_cp": -500, "depth": 8, "nodes": 100}
+
+    posted: list[tuple[str, str]] = []
+
+    def fake_post(path, params="", data=None):
+        posted.append((path, params))
+        if params == "claimDraw=true":
+            raise _http_error(400)
+        return b"{}"
+
+    bot.choose_move = fake_choose_move  # type: ignore[method-assign]
+    bot._post = fake_post  # type: ignore[method-assign]
+    outcome = bot._take_turn(
+        "G400", board, None, {"n": 0}, player=object(), my_color=True)
+
+    assert outcome is None
+    assert posted == [
+        ("/api/bot/game/G400/move/e2e4", "claimDraw=true"),
+        ("/api/bot/game/G400/move/e2e4", ""),
+    ]
+
+
+def test_plain_move_http_400_returns_stale_summary():
+    """Langkah ditolak Lichess (game sudah usang) bukan worker error."""
+    import chess
+
+    from kestrel.config import AppConfig
+    from kestrel.lichess_bot import LichessBot
+
+    bot = LichessBot(AppConfig(), token=TEST_TOKEN, dry_run=True)
+
+    def fake_choose_move(board, rng=None, player=None):
+        return chess.Move.from_uci("e2e4"), {"score_cp": 0, "depth": 8, "nodes": 100}
+
+    def fake_post(path, params="", data=None):
+        raise _http_error(400)
+
+    bot.choose_move = fake_choose_move  # type: ignore[method-assign]
+    bot._post = fake_post  # type: ignore[method-assign]
+    outcome = bot._take_turn(
+        "G400B", chess.Board(), None, {"n": 0}, player=object(), my_color=True)
+
+    assert outcome is not None
+    assert outcome["status"] == "move_rejected_400"
+
+
+def test_game_stream_timeout_is_handled_without_worker_error(monkeypatch):
+    """Timeout stream harus ditutup sebagai stream_ended, bukan exception."""
+    import chess
+
+    from kestrel.config import AppConfig
+    from kestrel.lichess_bot import LichessBot
+
+    bot = LichessBot(AppConfig(), token=TEST_TOKEN, dry_run=True)
+
+    def fake_stream(path):
+        yield {
+            "type": "gameFull",
+            "id": "TOUT1",
+            "white": {"name": "Azchess-1"},
+            "black": {"name": "Opponent"},
+            "initialFen": "startpos",
+            "state": {"moves": "", "status": "started", "winner": None},
+        }
+        raise TimeoutError("read timed out")
+
+    def fake_choose_move(board, rng=None, player=None):
+        return chess.Move.from_uci("e2e4"), {"score_cp": 0, "depth": 8, "nodes": 100}
+
+    monkeypatch.setattr(bot.api, "stream", fake_stream)
+    bot.choose_move = fake_choose_move  # type: ignore[method-assign]
+    bot._post = lambda path, params="", data=None: b"{}"  # type: ignore[method-assign]
+
+    summary = bot.play_game("TOUT1", player=object())
+    assert summary["status"] == "stream_ended"
+
+
+def _http_error(code):
+    from email.message import Message
+    import urllib.error
+
+    return urllib.error.HTTPError("https://lichess.org", code, "bad request", Message(), None)

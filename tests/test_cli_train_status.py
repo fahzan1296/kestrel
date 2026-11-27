@@ -24,6 +24,26 @@ def _args(monkeypatch, tmp_path):
     return cli.build_parser().parse_args(["train", "--generations", "1"])
 
 
+def test_selfplay_passes_champion_as_net_path(monkeypatch, tmp_path, capsys):
+    from kestrel import selfplay
+
+    captured = {}
+
+    def fake_run_selfplay(**kwargs):
+        captured.update(kwargs)
+        return {"games_finished": 1}
+
+    monkeypatch.setattr(selfplay, "run_selfplay", fake_run_selfplay)
+    monkeypatch.setattr(cli, "_load_or_exit", lambda args: _cfg(tmp_path))
+    monkeypatch.setattr(cli, "_apply_common", lambda cfg, args: cfg)
+    args = cli.build_parser().parse_args(["selfplay"])
+
+    assert cli.cmd_selfplay(args) == 0
+    capsys.readouterr()
+    assert "net_path" in captured
+    assert "learned_path" not in captured
+
+
 def test_cli_train_exposes_progress_to_dashboard(tmp_path, monkeypatch, capsys):
     args = _args(monkeypatch, tmp_path)
     seen_during_run = {}

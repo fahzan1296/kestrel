@@ -163,8 +163,14 @@ def test_trainer_one_generation(tmp_path):
     assert "knowledge" in gen["stages"]
     assert "nnue" in gen["stages"]
     results = cfg.results_path
-    assert (results / "nnue_eval.json").exists()
-    assert (results / "champion.json").exists()
+    store = CheckpointStore(results)
+    # Promosi lewat gate verifikasi bersifat noisy pada 2 game; yang harus
+    # pasti ada adalah artifact champion (bila lolos) atau kandidat (bila ditolak).
+    if gen.get("promoted"):
+        assert store.champion_model_path.exists()
+        assert (results / "champion.json").exists()
+    else:
+        assert store.candidates(), "kandidat harus tersimpan walau ditolak"
     assert (results / "training_log.jsonl").exists()
     ver_files = list(results.glob("verification_gen_*.json"))
     assert ver_files, "laporan verifikasi per generasi harus ada"

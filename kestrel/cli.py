@@ -171,7 +171,7 @@ def cmd_selfplay(args) -> int:
         time_ms=cfg.selfplay.time_ms, max_depth=cfg.selfplay.max_depth,
         max_plies=cfg.selfplay.max_plies, temperature=cfg.selfplay.temperature,
         min_depth=cfg.selfplay.min_depth, grace_ms=cfg.selfplay.grace_ms,
-        learned_path=str(store.champion_model_path) if store.champion_model_path.exists() else None,
+        net_path=str(store.champion_model_path) if store.champion_model_path.exists() else None,
         book_path=str(kb.db_path) if kb else None,
         pgn_path=cfg.pgn_path, db_path=cfg.db_path)
     if args.learn:
