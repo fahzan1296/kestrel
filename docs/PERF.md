@@ -133,6 +133,27 @@ Optimasi hanya dipertahankan bila:
 
 Semua eksperimen, termasuk yang tidak terbukti, dicatat di sini.
 
+## Phase 2 — Harness dan BLAS
+
+Harness sekarang punya `scripts/bench_perf.py --suite` dengan 5 FEN tetap:
+startpos, middlegame, taktik, endgame, dan posisi check. Metadata
+`blas_threads` ikut dicetak.
+
+Uji BLAS 20 run interleaved A/B/A/B, 10 run per varian, `--suite --nodes 10000`:
+
+| FEN | Default median NPS | Single-thread median NPS | Keputusan |
+|---|---:|---:|---|
+| startpos | 5496 | 5321 | default |
+| middlegame | 5326 | 5380 | default |
+| taktik | 5683 | 5692 | default |
+| endgame | 9336 | 9227 | default |
+| check | 7478 | 7494 | default |
+| agregat | 6110 | 6088 | default |
+
+P95 elapsed juga tidak konsisten lebih rendah pada single-thread. Selisihnya
+masuk noise dan tidak ada kemenangan yang bisa atribusi. **Keputusan: jangan
+aktifkan BLAS single-thread.** Tidak ada perubahan runtime yang dilakukan.
+
 ## Status
 
 - Optimasi diterapkan di mesin `kestrel-2`.
