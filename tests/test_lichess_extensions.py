@@ -579,7 +579,33 @@ def test_game_stream_timeout_is_handled_without_worker_error(monkeypatch):
 
 
 def _http_error(code):
-    from email.message import Message
     import urllib.error
+    from email.message import Message
 
     return urllib.error.HTTPError("https://lichess.org", code, "bad request", Message(), None)
+
+
+def test_take_turn_logs_perf_when_enabled(monkeypatch, capsys):
+    """Perf log ringan aktif lewat env, tanpa mencetak token."""
+    import chess
+
+    from kestrel.config import AppConfig
+    from kestrel.lichess_bot import LichessBot
+
+    monkeypatch.setenv("KESTREL_PERF_LOG", "1")
+    bot = LichessBot(AppConfig(), token=TEST_TOKEN, dry_run=True)
+
+    def fake_choose_move(board, rng=None, player=None):
+        return chess.Move.from_uci("e2e4"), {
+            "score_cp": 12, "depth": 9, "nodes": 123456}
+
+    bot.choose_move = fake_choose_move  # type: ignore[method-assign]
+    bot._post = lambda path, params="", data=None: b"{}"  # type: ignore[method-assign]
+    bot._take_turn(
+        "PERF1", chess.Board(), None, {"n": 0}, player=object(), my_color=True)
+
+    out = capsys.readouterr().out
+    assert "[perf]" in out
+    assert "PERF1" in out
+    assert "elapsed_ms=" in out
+    assert "nps=" in out

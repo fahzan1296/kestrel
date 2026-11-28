@@ -254,6 +254,9 @@ def run_training(cfg: AppConfig | None = None, *, generations: int | None = None
             emit("nnue training gagal; kandidat = champion tanpa bobot baru", error=str(exc))
 
         # ---------- 4. CANDIDATE ----------
+        # Jika training NNUE gagal, kandidat tetap champion/base net — bukan None.
+        if candidate is None:
+            candidate = load_default()
         cand_path = store.save_candidate(
             candidate, gen_label,
             metadata=_json_safe({"nnue": gen_summary["stages"].get("nnue"),

@@ -56,11 +56,10 @@ def run_game_worker(game_id: int, seed: int, time_ms: int, max_depth: int,
     rng = random.Random(seed)
     # 2.0: worker SELALU memakai net TinyNNUE terlatih — champion (bila ada)
     # atau checkpoint baseline bawaan paket. Tidak ada jalur "tanpa net".
+    net = load_default()
     if net_path and _Path(net_path).exists():
         with contextlib.suppress(ValueError, KeyError, TypeError):
             net = TinyNNUE.load(net_path)
-    else:
-        net = load_default()
     # 1.6: buku opening statistik opsional (pengetahuan hasil self-play).
     # 1.7: batas book dari config [knowledge] tidak lagi diabaikan
     # (bugfix: worker membangun KnowledgeBase dengan default semua).

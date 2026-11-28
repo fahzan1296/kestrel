@@ -306,8 +306,12 @@ def _worker_entry(gid, seed, time_ms, max_depth, max_plies, q, batch_id):
                         "book_max_moves": _cfg.knowledge.book_max_moves_per_position}
         except Exception:
             _book, _book_kw = None, {}
-        run_game_worker(gid, seed, time_ms, max_depth, max_plies, q,
-                        batch_id=batch_id, book_path=_book, **_book_kw)
+        run_game_worker(
+            gid, seed, time_ms, max_depth, max_plies, q,
+            batch_id=batch_id, book_path=_book,
+            book_max_plies=_book_kw.get("book_max_plies"),
+            book_min_games=_book_kw.get("book_min_games"),
+            book_max_moves=_book_kw.get("book_max_moves"))
     except Exception as exc:  # Report the failure to the parent collector.
         import traceback
         q.put({"type": "worker_failed", "game_id": gid, "batch_id": batch_id,

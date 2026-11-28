@@ -74,7 +74,7 @@ class TTEntry(NamedTuple):
     depth: int
     score: int
     bound: int
-    best: "chess.Move | None"
+    best: chess.Move | None
     age: int
 
 _ITEM0 = operator.itemgetter(0)
@@ -111,7 +111,7 @@ def _score_from_tt(score: int, ply: int) -> int:
 # ---------------- Zobrist inkremental (eksak polyglot, 1.7) ------------------
 # Tabel acak yang SAMA dengan chess.polyglot.POLYGLOT_RANDOM_ARRAY, dikonversi
 # ke list int biasa agar XOR-nya cepat (tanpa numpy scalar di jalur panas).
-_PA = [int(v) for v in chess.polyglot.POLYGLOT_RANDOM_ARRAY]
+_PA = [int(v) for v in chess.polyglot.POLYGLOT_RANDOM_ARRAY]  # pyright: ignore[reportAttributeAccessIssue]
 _TURN_W = _PA[780]  # term giliran: XOR saat WHITE to move (semantik polyglot)
 _BB_H1 = chess.BB_H1
 _BB_A1 = chess.BB_A1
@@ -358,6 +358,8 @@ class Searcher:
         to_sq = mv.to_square
         from_sq = mv.from_square
         promo = mv.promotion
+        if to_sq is None or from_sq is None:
+            return  # _push hanya dipakai untuk langkah nyata, bukan null move
         # PENTING: pivot di hash_board polyglot mengikuti urutan
         # ``enumerate(board.occupied_co)`` = [BLACK, WHITE] (chess.WHITE ==
         # True == 1), jadi base putih = 128*(pt-1) + 64 dan base hitam =
@@ -366,14 +368,14 @@ class Searcher:
             us_base, them_base = 64, 0
         else:
             us_base, them_base = 0, 64
-        pt = board.piece_type_at(from_sq)
+        pt = board.piece_type_at(from_sq) or chess.PAWN
         base = 128 * (pt - 1)
         key ^= _PA[base + us_base + from_sq]              # pindahkan bidak keluar
         # 2.0: kumpulkan perubahan bidak untuk delta akumulator TinyNNUE.
         removed: list = [(pt, turn == chess.WHITE, from_sq)]
         added: list = []
         if board.occupied_co[not turn] >> to_sq & 1:      # capture biasa
-            vt = board.piece_type_at(to_sq)
+            vt = board.piece_type_at(to_sq) or chess.PAWN
             key ^= _PA[128 * (vt - 1) + them_base + to_sq]
             removed.append((vt, turn != chess.WHITE, to_sq))
         elif (pt == chess.PAWN and to_sq == board.ep_square
@@ -513,6 +515,16 @@ class Searcher:
         value = self._eval_white(board, in_check=in_check, has_moves=has_moves,
                                  terminal=terminal)
         return value if board.turn == chess.WHITE else -value
+
+    def _stand_pat(self, board: chess.Board) -> int:
+        """Evaluasi stand-pat qsearch tanpa terminal check duplikat.
+
+        qsearch sudah menangani insufficient material, 75-langkah, dan
+        repetition di atasnya; pada cabang non-check dengan capture legal,
+        posisi juga bukan stalemate. Flag ini mencegah evaluate() membayar
+        predikat terminal mahal berulang di leaf qsearch.
+        """
+        return self._stm(board, in_check=False, has_moves=True, terminal=False)
 
     def _extract_pv(self, board: chess.Board, first_move: chess.Move | None = None,
                     max_len=24):
@@ -768,6 +780,7 @@ class Searcher:
                     and board.is_insufficient_material())):
             return 0
         in_check = self._is_check(board)
+        stand = -INF
         if in_check:
             # Stand-pat is illegal in check: search every evasion.
             moves = list(board.legal_moves)
@@ -779,7 +792,7 @@ class Searcher:
             # Urutan 1.6 dipertahankan (stand-pat cutoff dulu, capture-gen
             # belakangan) — cutoff stand-pat adalah kasus dominan qsearch;
             # in_check diketahui False sehingga handcrafted tak mengulanginya.
-            stand = self._stm(board, in_check=False)
+            stand = self._stand_pat(board)
             if stand >= beta:
                 return stand
             if stand > alpha:
@@ -791,7 +804,7 @@ class Searcher:
                 return alpha
             best = stand
             scored = self._score_moves(board, ply, None, moves)
-        for s0, mv, cap, promo, victim in scored:
+        for _, mv, cap, promo, victim in scored:
             if self.stop:
                 return self._stm(board)
             # Delta pruning dua-tahap (1.8): tahap murah dulu (1.7), lalu
@@ -933,7 +946,7 @@ class Searcher:
         # dua arah saat cutoff (gravity history 1.8).
         tried_quiets: list = []
         tried_caps: list = []
-        for s0, mv, cap, promo, victim in scored:
+        for _, mv, cap, promo, victim in scored:
             if self.stop:
                 return self._stm(board)
             frm = mv.from_square

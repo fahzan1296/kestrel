@@ -104,6 +104,7 @@ def _play_cross_game(task: dict[str, Any]) -> dict[str, Any]:
         pgn.headers["White"] = "Kestrel" if kestrel_white else sf_name
         pgn.headers["Black"] = sf_name if kestrel_white else "Kestrel"
         node = pgn
+        mover_white = kestrel_white
         moves: list[dict[str, str]] = []
         forfeit: str | None = None
         nps_sum = 0
@@ -429,6 +430,9 @@ def run_cross_engine_training(cfg, *, run_id: str, skill: int = 5,
         parallel = xc.parallel if xc else 1
     if adaptive_skill is None:
         adaptive_skill = xc.adaptive_skill if xc else True
+    assert stockfish_time_ms is not None
+    assert parallel is not None
+    assert adaptive_skill is not None
     if skill == 5 and xc is not None:
         skill = xc.skill
     skill_min = xc.skill_min if xc else 0

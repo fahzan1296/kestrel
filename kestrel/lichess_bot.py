@@ -692,7 +692,15 @@ class LichessBot:
                    my_color: bool = chess.WHITE) -> dict | None:
         """Hitung & kirim satu langkah kita. resign_streak_state = dict ['n'].
         Return dict ringkasan bila bot resign (game selesai dari sisi kita)."""
+        started = time.perf_counter()
         mv, info = self.choose_move(board, rng, player=player)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        if os.environ.get("KESTREL_PERF_LOG"):
+            nodes = int(info.get("nodes") or 0)
+            nps = int(nodes / (elapsed_ms / 1000.0)) if elapsed_ms > 0 else 0
+            print(f"[perf] game={game_id} depth={info.get('depth')} nodes={nodes} "
+                  f"elapsed_ms={elapsed_ms:.1f} nps={nps} "
+                  f"score_cp={info.get('score_cp')}", flush=True)
         if mv is None:
             return None
         score = self._eval_for_me(board, info)
