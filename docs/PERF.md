@@ -172,6 +172,26 @@ P95 elapsed juga memburuk di startpos, middlegame, dan taktik.
 **Keputusan: revert.** Helper dan test eksperimen dihapus; `search.py`
 kembali ke baseline. Full suite setelah revert: `83 passed, 2 warnings`.
 
+## Phase 2 — NNUE forward scratch buffer
+
+Eksperimen TDD berikutnya: `threading.local()` buffer FP32 berukuran
+`256 + AUX_DIM` dipakai ulang oleh `TinyNNUE.raw` sebagai pengganti
+`np.concatenate`. Parity eksak 5 FEN (`raw`, `stm_score`, `white_score`)
+lolos. A/B interleaved 20 run (`--suite --nodes 10000`):
+
+| Metrik | Baseline | Scratch buffer |
+|---|---:|---:|
+| Agregat median NPS | 6435 | 6471 |
+| Startpos median NPS | 5677 | 5726 |
+| Middlegame median NPS | 5567 | 5640 |
+| Taktik median NPS | 5962 | 5974 |
+| Endgame median NPS | 9596 | 9628 |
+| Check median NPS | 7572 | 7590 |
+
+Kenaikan agregat hanya ~0.6%, jauh di bawah ambang 5%. P95 elapsed juga
+tidak membaik konsisten. **Keputusan: revert.** `nnue.py` kembali ke
+baseline. Full suite setelah revert: `83 passed, 2 warnings`.
+
 ## Status
 
 - Optimasi diterapkan di mesin `kestrel-2`.
