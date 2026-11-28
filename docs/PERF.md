@@ -192,6 +192,31 @@ Kenaikan agregat hanya ~0.6%, jauh di bawah ambang 5%. P95 elapsed juga
 tidak membaik konsisten. **Keputusan: revert.** `nnue.py` kembali ke
 baseline. Full suite setelah revert: `83 passed, 2 warnings`.
 
+## Phase 2 — _score_moves alias/commit, lalu stop
+
+Profil 5-FEN terbaru masih menempatkan `search.py:552(_score_moves)`
+di puncak self-time (1.626s dari 18.767s total). Golden test parity
+9 kasus (startpos, middlegame, taktik, endgame, check, en passant,
+castling, promosi, dan重复 capture) dibuat dengan urutan `(score,
+uci, capture, promo, victim)` eksak; input tidak boleh dimutasi.
+
+Satu perubahan diuji: local alias `get`/`piece_type_at`/`PIECE_VALUES`,
+`tabel BB_SQUARES`, dan comparison killer langsung. Golden parity lolos,
+skor 5 FEN identik, tetapi A/B interleaved 20 run justu lebih lambat:
+
+| Metrik | Baseline | Optimized |
+|---|---:|---:|
+| Agregat median NPS | 6337 | 6273 |
+| Startpos median NPS | 5596 | 5542 |
+| Middlegame median NPS | 5478 | 5454 |
+| Taktik median NPS | 5906 | 5782 |
+| Endgame median NPS | 9476 | 9420 |
+| Check median NPS | 7606 | 7442 |
+
+**Keputusan: revert dan hentikan Phase 2.** Tidak ada optimasi lanjutan
+yang lolos gate 5%. Golden test tetap dipertahankan sebagai guard regresi.
+`search.py` kembali ke baseline. Full suite akhir: `84 passed, 2 warnings`.
+
 ## Status
 
 - Optimasi diterapkan di mesin `kestrel-2`.
