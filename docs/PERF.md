@@ -154,6 +154,24 @@ P95 elapsed juga tidak konsisten lebih rendah pada single-thread. Selisihnya
 masuk noise dan tidak ada kemenangan yang bisa atribusi. **Keputusan: jangan
 aktifkan BLAS single-thread.** Tidak ada perubahan runtime yang dilakukan.
 
+## Phase 2 — Cache legal moves di qsearch
+
+Eksperimen TDD: helper `_legal_moves_cached()` dipakai untuk dua jalur
+`board.legal_moves` di qsearch, dengan tuple immutable supaya caller tidak
+bisa mengubah cache. Parity skor 5 FEN lolos, tetapi A/B interleaved 20 run
+(`--suite --nodes 10000`) menunjukkan regression:
+
+| Metrik | Baseline | Cache qsearch |
+|---|---:|---:|
+| Agregat median NPS | 5993 | 5874 |
+| Startpos median NPS | 5372 | 4974 |
+| Middlegame median NPS | 5334 | 5078 |
+| Taktik median NPS | 5568 | 5245 |
+
+P95 elapsed juga memburuk di startpos, middlegame, dan taktik.
+**Keputusan: revert.** Helper dan test eksperimen dihapus; `search.py`
+kembali ke baseline. Full suite setelah revert: `83 passed, 2 warnings`.
+
 ## Status
 
 - Optimasi diterapkan di mesin `kestrel-2`.
