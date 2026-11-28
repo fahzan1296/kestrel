@@ -1,6 +1,6 @@
 # Kestrel performance notes
 
-Catatan ini mendokumentasikan optimasi performa 2026-11-28 untuk Kestrel 2.0.1.
+Catatan ini mendokumentasikan optimasi performa 2026-11-28 untuk Kestrel 2.0.4.
 Prinsipnya: ukur dulu, ubah satu hal, ukur ulang, lalu keep/revert.
 
 ## Lingkungan
@@ -216,6 +216,36 @@ skor 5 FEN identik, tetapi A/B interleaved 20 run justu lebih lambat:
 **Keputusan: revert dan hentikan Phase 2.** Tidak ada optimasi lanjutan
 yang lolos gate 5%. Golden test tetap dipertahankan sebagai guard regresi.
 `search.py` kembali ke baseline. Full suite akhir: `84 passed, 2 warnings`.
+
+## Lanjutan 2.0.4 (2026-11-28)
+
+Gate kekuatan baseline v2 akhirnya dijalankan:
+`scripts/match_classic_vs_nnue.py --games 20 --time-ms 200` →
+NNUE **8W-2D-10L**, score 0,45, Elo −35, CI95 [0,258; 0,658], SPRT
+`continue`. Artinya v2 setara secara statistik dengan teacher klasik 1.8,
+jauh lebih baik dari v1 (score 0,25), tetapi belum membuktikan keunggulan.
+Arsip: `results/match_classic_vs_nnue.json` (diabaikan git, tersimpan lokal).
+
+Eksperimen kecepatan lanjutan: tiga pendekatan diuji dan **ditolak**
+karena tidak lolos gate 5%:
+
+| Eksperimen | Hasil | Keputusan |
+|---|---|---|
+| C `ctypes` untuk `nnue.delta` | 20,7 µs vs 15,2 µs Python | revert |
+| Numpy batched indexing untuk `delta` | 60,4 µs vs 15,4 µs | revert |
+| Preallocated in-place buffer `delta` | 15,5 µs vs 15,4 µs | revert |
+
+Kesimpulan: hot path search didominasi `python-chess` (`board.push`,
+movegen) dan FFI overhead lebih besar dari kerja yang dipangkas. Tidak
+ada gain signifikan tanpa rewrite engine penuh.
+
+**Satu optimasi yang lolos**: `nnue_train._linear_warmstart` memakai
+identitas Woodbury (sistem n×n) untuk korpus ≤ 1024 sampel. Ekuivalen
+numerik (Δ ~1e-13), mempercepat training kecil dari 3,27 s → 0,51 s
+(**6,4x**) dan solver dari 0,57 s → 0,008 s (**68x**). Jalur primal
+chunked tetap dipakai untuk korpus besar.
+
+Full suite setelah perubahan: `87 passed, 2 warnings`.
 
 ## Status
 

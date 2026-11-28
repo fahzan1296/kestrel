@@ -4,6 +4,34 @@ Riwayat versi KESTREL. Entri pra-2.0 diringkas dari changelog per-versi lama
 (1.2–1.8) yang kini dihapus dari repo; detail lengkapnya tersimpan di riwayat
 git proyek asal.
 
+## 2.0.4 — Optimasi training & penuntasan gate baseline
+
+### Fixed
+- Artifact `results/train_state.json` dan `results/train.log` tidak lagi
+  menunjuk path mesin lama (`/home/z/.../kestrel-1.8/results`).
+- `results/HASIL_BOOTSTRAP.md`: klaim "verifikasi baseline belum dijalankan"
+  diganti hasil aktual (8W-2D-10L, score 0,45, Elo −35, SPRT continue).
+
+### Changed
+- `nnue_train._linear_warmstart`: normal equation primal 1536×1536
+  diganti identitas Woodbury (sistem n×n) untuk korpus ≤ 1024 sampel.
+  Ekuivalen numerik (Δ ~1e-13) dan **~68x lebih cepat** pada korpus kecil;
+  jalur primal chunked tetap dipakai untuk korpus besar.
+- Versi disamakan ke 2.0.4 di `pyproject.toml`, `kestrel/__init__.py`,
+  `docs/PERF.md`, dan `docs/deployment.md`.
+
+### Added
+- `tests/test_regressions.py`: gate 75-langkah, evaluator produksi
+  (antisimetri + nonzero), dan validasi warmstart Woodbury.
+
+## 2.0.3 — Perbaikan bot Lichess
+
+### Fixed
+- Auto-seek tidak lagi menolak challenge kiriman sendiri ketika event Lichess
+  tidak menyertakan field `direction`. Fallback mencocokkan nama challenger
+  dengan username bot, sehingga challenge sendiri tidak di-decline dan
+  gameStart berikutnya tetap memakai reservasi slot.
+
 ## 2.0.0 — Graduasi: evaluator AI TinyNNUE sepenuhnya
 
 ### Added

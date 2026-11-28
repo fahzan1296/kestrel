@@ -1,6 +1,6 @@
 # Deployment: training + bot Lichess di InstaBox
 
-Kestrel 2.0.0 dijalankan di mesin InstaBox `kestrel-2`
+Kestrel 2.0.4 dijalankan di mesin InstaBox `kestrel-2`
 (`m_agrb3oehifkozpqnikonsnaysu`) sebagai proses background. Render dan Hugging Face
 Space tidak dipakai lagi.
 
@@ -8,7 +8,7 @@ Space tidak dipakai lagi.
 
 | Path | Isi |
 |---|---|
-| `/data/home/kestrel` | source Kestrel 2.0.0 |
+| `/data/home/kestrel` | source Kestrel 2.0.4 |
 | `/data/home/kestrel/.venv` | virtualenv Python 3.13 |
 | `/data/home/kestrel/.env` | `KESTREL_LICHESS_TOKEN`, mode `0600` |
 | `/data/home/kestrel/train-supervisor.sh` | loop restart training |

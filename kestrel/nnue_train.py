@@ -216,28 +216,55 @@ def _linear_warmstart(samples: list[dict], ridge: float = 1e-2,
     kecil untuk eksplorasi.
     """
     d = 2 * PLANES
-    ata = np.zeros((d, d), np.float64)
-    aty = np.zeros(d, np.float64)
-    for begin in range(0, len(samples), chunk):
-        part = samples[begin:begin + chunk]
-        n = len(part)
-        s_stm = np.zeros((n, PLANES), np.float32)
-        s_ntm = np.zeros((n, PLANES), np.float32)
-        y = np.empty(n, np.float64)
-        for i, s in enumerate(part):
-            pw = s["plane_w"]; pb = s["plane_b"]
+    n_total = len(samples)
+    # Optimisasi 2.0.4: normal equation primal berdimensi 1536x1536 dipecah
+    # lewat identitas Woodbury. Untuk n sampel kecil (kasus umum smoke test &
+    # generasi awal) menyelesaikan sistem n x n jauh lebih murah: O(n^3)
+    # versus O(d^3), tanpa mengubah solusi (selisih numerik ~1e-13).
+    # Untuk korpus besar pakai jalur primal chunked yang lama agar memori
+    # tidak meletup (n x n float64 = 8*n^2 byte).
+    if n_total <= 1024:
+        a = np.zeros((n_total, d), np.float64)
+        y = np.empty(n_total, np.float64)
+        for i, s in enumerate(samples):
+            pw = np.asarray(s["plane_w"], dtype=np.intp)
+            pb = np.asarray(s["plane_b"], dtype=np.intp)
             if s["stm_white"]:
-                s_stm[i, pw] = 1.0
-                s_ntm[i, pb] = 1.0
+                a[i, pw] = 1.0
+                a[i, PLANES + pb] = 1.0
             else:
-                s_stm[i, pb] = 1.0
-                s_ntm[i, pw] = 1.0
+                a[i, pb] = 1.0
+                a[i, PLANES + pw] = 1.0
             y[i] = s["target_cp"] / OUT_SCALE
-        a = np.concatenate((s_stm, s_ntm), axis=1).astype(np.float64)
-        ata += a.T @ a
-        aty += a.T @ y
-    reg = ridge * max(1.0, float(np.trace(ata)) / d)
-    theta = np.linalg.solve(ata + reg * np.eye(d), aty)
+        # Skala regularisasi mengikuti trace(A^T A) = jumlah fitur aktif,
+        # identik dengan jalur primal di bawah (~2 * n_total).
+        scale = max(1.0, float(np.count_nonzero(a)) / d)
+        reg = ridge * scale
+        alpha = np.linalg.solve(a @ a.T + reg * np.eye(n_total), y)
+        theta = a.T @ alpha
+    else:
+        ata = np.zeros((d, d), np.float64)
+        aty = np.zeros(d, np.float64)
+        for begin in range(0, n_total, chunk):
+            part = samples[begin:begin + chunk]
+            n = len(part)
+            s_stm = np.zeros((n, PLANES), np.float32)
+            s_ntm = np.zeros((n, PLANES), np.float32)
+            yy = np.empty(n, np.float64)
+            for i, s in enumerate(part):
+                pw = s["plane_w"]; pb = s["plane_b"]
+                if s["stm_white"]:
+                    s_stm[i, pw] = 1.0
+                    s_ntm[i, pb] = 1.0
+                else:
+                    s_stm[i, pb] = 1.0
+                    s_ntm[i, pw] = 1.0
+                yy[i] = s["target_cp"] / OUT_SCALE
+            aa = np.concatenate((s_stm, s_ntm), axis=1).astype(np.float64)
+            ata += aa.T @ aa
+            aty += aa.T @ yy
+        reg = ridge * max(1.0, float(np.trace(ata)) / d)
+        theta = np.linalg.solve(ata + reg * np.eye(d), aty)
     w1 = (np.random.default_rng(11).standard_normal((PLANES, ACC_DIM))
           * 0.01).astype(np.float32)
     w1[:, 0] = theta[:PLANES].astype(np.float32)
